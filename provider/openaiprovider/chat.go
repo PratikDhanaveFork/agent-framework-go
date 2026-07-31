@@ -227,6 +227,11 @@ func buildCompletionParams(model string, messages []*message.Message, opts []age
 	var params openai.ChatCompletionNewParams
 	if p, ok := agent.GetOption(opts, ChatCompletionNewParams); ok {
 		params = p
+		// Clone the mutable slice fields appended to below so we never mutate
+		// the caller's backing arrays (the option stores a shallow copy of the
+		// struct); the anthropic and gemini providers clone for the same reason.
+		params.Messages = slices.Clone(params.Messages)
+		params.Tools = slices.Clone(params.Tools)
 	}
 	params.Model = cmp.Or(params.Model, model)
 	if frmt, ok := agent.GetOption(opts, agent.WithResponseFormat); ok {
