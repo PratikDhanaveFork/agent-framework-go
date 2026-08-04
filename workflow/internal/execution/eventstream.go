@@ -177,7 +177,6 @@ func (s *streamingRunEventStream) runLoop() {
 		}
 
 		cycleCtx := ctx
-		var runActivity *observability.Activity
 
 		// Run all available supersteps continuously
 		// Events are streamed out in real-time as they happen via the event handler
@@ -192,6 +191,7 @@ func (s *streamingRunEventStream) runLoop() {
 			// Open the WorkflowRun span only when there's actual work to
 			// process, to avoid spurious zero-superstep spans on no-work loop
 			// iterations. This mirrors the lockstep implementation.
+			var runActivity *observability.Activity
 			cycleCtx, runActivity = telemetry.StartWorkflowRun(ctx, workflowMetadata(wf, s.stepRunner.SessionID()))
 			runActivity.AddEvent(observability.EventWorkflowStarted)
 
@@ -218,8 +218,7 @@ func (s *streamingRunEventStream) runLoop() {
 					return
 				}
 			}
-		}
-		if runActivity != nil {
+
 			runActivity.AddEvent(observability.EventWorkflowCompleted)
 			runActivity.End()
 		}
