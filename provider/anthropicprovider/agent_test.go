@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -172,6 +173,126 @@ func collectStreamingToolCalls(t *testing.T, events string) []*message.FunctionC
 	return calls
 }
 
+// finishReasonCases enumerates every Anthropic stop_reason the provider maps to
+// a canonical FinishReason, exercising the unexported mapStopReason helper end
+// to end through the public API.
+var finishReasonCases = []struct {
+	stopReason string
+	want       string
+}{
+	{"end_turn", "stop"},
+	{"stop_sequence", "stop"},
+	{"pause_turn", "stop"},
+	{"max_tokens", "length"},
+	{"tool_use", "tool_calls"},
+	{"refusal", "content_filter"},
+}
+
+// TestNonStreamingFinishReason verifies the provider maps the Anthropic
+// stop_reason on a non-streaming response to the canonical FinishReason.
+func TestNonStreamingFinishReason(t *testing.T) {
+	for _, tc := range finishReasonCases {
+		t.Run(tc.stopReason, func(t *testing.T) {
+			body := fmt.Sprintf(`{
+				"id":"msg_finish",
+				"type":"message",
+				"role":"assistant",
+				"model":"claude-3-5-sonnet-20241022",
+				"stop_reason":%q,
+				"stop_sequence":null,
+				"content":[{"type":"text","text":"hello"}],
+				"usage":{"input_tokens":10,"output_tokens":5}
+			}`, tc.stopReason)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, body)
+			}))
+			defer server.Close()
+
+			resp, err := newTestClient(t, server).RunText(t.Context(), "hi").Collect()
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if resp.FinishReason != tc.want {
+				t.Errorf("FinishReason = %q, want %q", resp.FinishReason, tc.want)
+			}
+		})
+	}
+}
+
+// TestStreamingFinishReason verifies the provider captures the stop_reason from
+// the streaming message_delta event and reports it as the canonical
+// FinishReason on the collected response.
+func TestStreamingFinishReason(t *testing.T) {
+	for _, tc := range finishReasonCases {
+		t.Run(tc.stopReason, func(t *testing.T) {
+			stream := "" +
+				"event: message_start\n" +
+				`data: {"type":"message_start","message":{"id":"msg_stream_finish","type":"message","role":"assistant","content":[],"model":"claude-3-5-sonnet-20241022","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":1}}}` + "\n\n" +
+				"event: content_block_start\n" +
+				`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}` + "\n\n" +
+				"event: content_block_delta\n" +
+				`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}` + "\n\n" +
+				"event: content_block_stop\n" +
+				`data: {"type":"content_block_stop","index":0}` + "\n\n" +
+				"event: message_delta\n" +
+				fmt.Sprintf(`data: {"type":"message_delta","delta":{"stop_reason":%q,"stop_sequence":null},"usage":{"output_tokens":5}}`, tc.stopReason) + "\n\n" +
+				"event: message_stop\n" +
+				`data: {"type":"message_stop"}` + "\n\n"
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, stream)
+			}))
+			defer server.Close()
+
+			resp, err := newTestClient(t, server).RunText(t.Context(), "hi", agent.Stream(true)).Collect()
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if resp.FinishReason != tc.want {
+				t.Errorf("FinishReason = %q, want %q", resp.FinishReason, tc.want)
+			}
+		})
+	}
+}
+
+// TestStreamingFinishReasonNotClobbered verifies that once a non-empty
+// stop_reason has been captured from a message_delta, a later message_delta
+// carrying an empty stop_reason does not overwrite it. This exercises the guard
+// in the streaming path that skips empty stop_reason chunks.
+func TestStreamingFinishReasonNotClobbered(t *testing.T) {
+	stream := "" +
+		"event: message_start\n" +
+		`data: {"type":"message_start","message":{"id":"msg_stream_finish","type":"message","role":"assistant","content":[],"model":"claude-3-5-sonnet-20241022","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":1}}}` + "\n\n" +
+		"event: content_block_start\n" +
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}` + "\n\n" +
+		"event: content_block_delta\n" +
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}` + "\n\n" +
+		"event: content_block_stop\n" +
+		`data: {"type":"content_block_stop","index":0}` + "\n\n" +
+		"event: message_delta\n" +
+		`data: {"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"output_tokens":5}}` + "\n\n" +
+		"event: message_delta\n" +
+		`data: {"type":"message_delta","delta":{"stop_reason":null,"stop_sequence":null},"usage":{"output_tokens":1}}` + "\n\n" +
+		"event: message_stop\n" +
+		`data: {"type":"message_stop"}` + "\n\n"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, stream)
+	}))
+	defer server.Close()
+
+	resp, err := newTestClient(t, server).RunText(t.Context(), "hi", agent.Stream(true)).Collect()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.FinishReason != "length" {
+		t.Errorf("FinishReason = %q, want %q", resp.FinishReason, "length")
+	}
+}
+
 func TestConfigInstructions(t *testing.T) {
 	bodyCh := make(chan []byte, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -282,6 +403,70 @@ func TestTextCitationsBecomeAnnotations(t *testing.T) {
 	}
 	if citation.RawRepresentation == nil {
 		t.Error("citation RawRepresentation is nil")
+	}
+}
+
+// TestStreamingTextCitationsBecomeAnnotations mirrors
+// TestTextCitationsBecomeAnnotations for the streaming path: citations are only
+// present on the accumulated text block, so the content_block_stop handler must
+// surface them as annotations. The streamed text arrives via text_delta and the
+// citation via a citations_delta.
+func TestStreamingTextCitationsBecomeAnnotations(t *testing.T) {
+	stream := "" +
+		"event: message_start\n" +
+		`data: {"type":"message_start","message":{"id":"msg_stream_cite","type":"message","role":"assistant","content":[],"model":"claude-3-5-sonnet-20241022","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":1}}}` + "\n\n" +
+		"event: content_block_start\n" +
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}` + "\n\n" +
+		"event: content_block_delta\n" +
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"The answer cites the docs."}}` + "\n\n" +
+		"event: content_block_delta\n" +
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"citations_delta","citation":{"type":"web_search_result_location","cited_text":"source excerpt","encrypted_index":"enc_123","title":"Example Source","url":"https://example.com/source"}}}` + "\n\n" +
+		"event: content_block_stop\n" +
+		`data: {"type":"content_block_stop","index":0}` + "\n\n" +
+		"event: message_delta\n" +
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":5}}` + "\n\n" +
+		"event: message_stop\n" +
+		`data: {"type":"message_stop"}` + "\n\n"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, stream)
+	}))
+	defer server.Close()
+
+	resp, err := newTestClient(t, server).RunText(t.Context(), "cite something", agent.Stream(true)).Collect()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var citation *message.CitationAnnotation
+	var streamedText string
+	for content := range resp.Contents() {
+		tc, ok := content.(*message.TextContent)
+		if !ok {
+			continue
+		}
+		streamedText += tc.Text
+		for _, ann := range tc.Annotations {
+			if c, ok := ann.(*message.CitationAnnotation); ok {
+				citation = c
+			}
+		}
+	}
+	if streamedText != "The answer cites the docs." {
+		t.Errorf("streamed text = %q, want %q", streamedText, "The answer cites the docs.")
+	}
+	if citation == nil {
+		t.Fatal("expected a citation annotation on the streamed text")
+	}
+	if citation.URL != "https://example.com/source" {
+		t.Errorf("citation URL = %q, want %q", citation.URL, "https://example.com/source")
+	}
+	if citation.Title != "Example Source" {
+		t.Errorf("citation Title = %q, want %q", citation.Title, "Example Source")
+	}
+	if citation.Snippet != "source excerpt" {
+		t.Errorf("citation Snippet = %q, want %q", citation.Snippet, "source excerpt")
 	}
 }
 
@@ -455,6 +640,39 @@ func TestStreamingToolCallsSupportInterleavedDeltas(t *testing.T) {
 		if call.Arguments != want[call.CallID] {
 			t.Errorf("call %q arguments = %q, want %q", call.CallID, call.Arguments, want[call.CallID])
 		}
+	}
+}
+
+// When the streaming request faults (here, an immediate HTTP 500 before any
+// SSE event) the provider must surface only the error and emit no trailing
+// UsageContent update. This matches openaiprovider chat streaming, which yields
+// stream.Err() alone on failure; an aggregator/otel middleware counting
+// UsageContent would otherwise record phantom usage for a call that never ran.
+func TestStreamingFaultEmitsNoUsage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	var gotErr error
+	var updates int
+	for update, err := range newTestClient(t, server).RunText(t.Context(), "hi", agent.Stream(true)) {
+		if err != nil {
+			gotErr = err
+			continue
+		}
+		updates++
+		for _, c := range update.Contents {
+			if _, ok := c.(*message.UsageContent); ok {
+				t.Error("streaming fault emitted a UsageContent update; want none")
+			}
+		}
+	}
+	if gotErr == nil {
+		t.Fatal("expected a terminal error from the faulted stream, got nil")
+	}
+	if updates != 0 {
+		t.Errorf("got %d non-error updates, want 0 before the fault", updates)
 	}
 }
 
@@ -739,5 +957,73 @@ func TestBuildMessageParam_HostedFileContentReturnsError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "file_123") {
 		t.Errorf("error = %v, want it to mention the offending file id", err)
+	}
+}
+
+// countingReadCloser counts Close calls on an HTTP response body.
+type countingReadCloser struct {
+	io.ReadCloser
+	closes *atomic.Int64
+}
+
+func (c *countingReadCloser) Close() error {
+	c.closes.Add(1)
+	return c.ReadCloser.Close()
+}
+
+// closeCountingTransport wraps each response body so tests can assert the
+// streaming HTTP body is released once the run completes.
+type closeCountingTransport struct {
+	base   http.RoundTripper
+	closes *atomic.Int64
+}
+
+func (t *closeCountingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := t.base.RoundTrip(req)
+	if err != nil || resp == nil {
+		return resp, err
+	}
+	resp.Body = &countingReadCloser{ReadCloser: resp.Body, closes: t.closes}
+	return resp, nil
+}
+
+// TestStreamingClosesResponseBody verifies the streaming path releases the HTTP
+// response body when the consumer stops iterating early. Without an explicit
+// stream.Close(), the body is never returned to the pool, leaking the
+// underlying connection. This mirrors the defer-close already present on the
+// Chat Completions streaming path and matches the .NET/Python SDKs, which
+// dispose the streaming response on early enumeration.
+func TestStreamingClosesResponseBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, minimalStreamingResponse("hello world"))
+	}))
+	defer server.Close()
+
+	var closes atomic.Int64
+	httpClient := &http.Client{Transport: &closeCountingTransport{base: http.DefaultTransport, closes: &closes}}
+	a := anthropicprovider.NewAgent(
+		anthropic.NewClient(
+			option.WithBaseURL(server.URL),
+			option.WithAPIKey("test"),
+			option.WithHTTPClient(httpClient),
+		),
+		anthropicprovider.AgentConfig{
+			Model:  "claude-3-5-sonnet-20241022",
+			Config: agent.Config{DisableFuncAutoCall: true},
+		},
+	)
+
+	// Stop iterating after the first streamed update. The provider's run
+	// closure then returns via yield=false, which must close the body.
+	for _, err := range a.RunText(t.Context(), "hi", agent.Stream(true)) {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		break
+	}
+
+	if got := closes.Load(); got == 0 {
+		t.Fatal("streaming response body was not closed after early consumer exit")
 	}
 }
