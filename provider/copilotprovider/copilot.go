@@ -144,6 +144,10 @@ func (p *provider) responseUpdateForSessionEvent(event copilot.SessionEvent, isS
 		return p.assistantMessageDeltaUpdate(event, data), false, nil
 	case *copilot.AssistantMessageData:
 		return p.assistantMessageUpdate(event, data, isStreaming), false, nil
+	case *copilot.AssistantReasoningData:
+		return p.assistantReasoningUpdate(event, data), false, nil
+	case *copilot.AssistantReasoningDeltaData:
+		return p.assistantReasoningDeltaUpdate(event, data), false, nil
 	case *copilot.ToolExecutionStartData:
 		return p.toolExecutionStartUpdate(event, data), false, nil
 	case *copilot.ToolExecutionCompleteData:
@@ -153,6 +157,14 @@ func (p *provider) responseUpdateForSessionEvent(event copilot.SessionEvent, isS
 	case *copilot.SessionIdleData:
 		return rawEventUpdate(event), true, nil
 	case *copilot.SessionErrorData:
+		// A rate_limit error flagged EligibleForAutoSwitch means the runtime will
+		// follow it with an auto_mode_switch.requested event and keep the session
+		// alive. Surface the error as a non-terminal notification so the run loop
+		// keeps pumping the subsequent auto-switch events and the eventual idle
+		// completion instead of aborting the run.
+		if data.EligibleForAutoSwitch != nil && *data.EligibleForAutoSwitch {
+			return rawEventUpdate(event), false, nil
+		}
 		return rawEventUpdate(event), true, fmt.Errorf("session error: %s", sessionErrorMessage(data))
 	default:
 		return rawEventUpdate(event), false, nil
@@ -262,24 +274,60 @@ func copyResumeSessionConfig(source *copilot.SessionConfig) copilot.ResumeSessio
 		return copilot.ResumeSessionConfig{Streaming: copilot.Bool(true)}
 	}
 	return copilot.ResumeSessionConfig{
-		Model:               source.Model,
-		ReasoningEffort:     source.ReasoningEffort,
-		Tools:               slices.Clone(source.Tools),
-		SystemMessage:       source.SystemMessage,
-		AvailableTools:      source.AvailableTools,
-		ExcludedTools:       source.ExcludedTools,
-		Provider:            source.Provider,
-		OnPermissionRequest: source.OnPermissionRequest,
-		OnUserInputRequest:  source.OnUserInputRequest,
-		Hooks:               source.Hooks,
-		WorkingDirectory:    source.WorkingDirectory,
-		ConfigDirectory:     source.ConfigDirectory,
-		MCPServers:          source.MCPServers,
-		CustomAgents:        source.CustomAgents,
-		SkillDirectories:    source.SkillDirectories,
-		DisabledSkills:      source.DisabledSkills,
-		InfiniteSessions:    source.InfiniteSessions,
-		Streaming:           copyBoolDefaultTrue(source.Streaming),
+		ClientName:                         source.ClientName,
+		Model:                              source.Model,
+		ReasoningEffort:                    source.ReasoningEffort,
+		ReasoningSummary:                   source.ReasoningSummary,
+		ContextTier:                        source.ContextTier,
+		Tools:                              slices.Clone(source.Tools),
+		SystemMessage:                      source.SystemMessage,
+		AvailableTools:                     source.AvailableTools,
+		ExcludedTools:                      source.ExcludedTools,
+		ExcludedBuiltInAgents:              source.ExcludedBuiltInAgents,
+		Provider:                           source.Provider,
+		Capi:                               source.Capi,
+		Providers:                          source.Providers,
+		Models:                             source.Models,
+		ModelCapabilities:                  source.ModelCapabilities,
+		EnableSessionTelemetry:             source.EnableSessionTelemetry,
+		EnableCitations:                    source.EnableCitations,
+		SessionLimits:                      source.SessionLimits,
+		SkipCustomInstructions:             source.SkipCustomInstructions,
+		CustomAgentsLocalOnly:              source.CustomAgentsLocalOnly,
+		CoauthorEnabled:                    source.CoauthorEnabled,
+		ManageScheduleEnabled:              source.ManageScheduleEnabled,
+		OnPermissionRequest:                source.OnPermissionRequest,
+		OnMCPAuthRequest:                   source.OnMCPAuthRequest,
+		OnUserInputRequest:                 source.OnUserInputRequest,
+		Hooks:                              source.Hooks,
+		WorkingDirectory:                   source.WorkingDirectory,
+		ConfigDirectory:                    source.ConfigDirectory,
+		EnableConfigDiscovery:              source.EnableConfigDiscovery,
+		SkipEmbeddingRetrieval:             source.SkipEmbeddingRetrieval,
+		EmbeddingCacheStorage:              source.EmbeddingCacheStorage,
+		OrganizationCustomInstructions:     source.OrganizationCustomInstructions,
+		EnableOnDemandInstructionDiscovery: source.EnableOnDemandInstructionDiscovery,
+		EnableFileHooks:                    source.EnableFileHooks,
+		EnableHostGitOperations:            source.EnableHostGitOperations,
+		EnableSessionStore:                 source.EnableSessionStore,
+		EnableSkills:                       source.EnableSkills,
+		IncludeSubAgentStreamingEvents:     source.IncludeSubAgentStreamingEvents,
+		MCPServers:                         source.MCPServers,
+		MCPOAuthTokenStorage:               source.MCPOAuthTokenStorage,
+		CustomAgents:                       source.CustomAgents,
+		DefaultAgent:                       source.DefaultAgent,
+		Agent:                              source.Agent,
+		SkillDirectories:                   source.SkillDirectories,
+		PluginDirectories:                  source.PluginDirectories,
+		InstructionDirectories:             source.InstructionDirectories,
+		DisabledSkills:                     source.DisabledSkills,
+		InfiniteSessions:                   source.InfiniteSessions,
+		LargeOutput:                        source.LargeOutput,
+		ToolSearch:                         source.ToolSearch,
+		Memory:                             source.Memory,
+		GitHubToken:                        source.GitHubToken,
+		RemoteSession:                      source.RemoteSession,
+		Streaming:                          copyBoolDefaultTrue(source.Streaming),
 	}
 }
 
@@ -529,8 +577,43 @@ func (p *provider) assistantMessageUpdate(event copilot.SessionEvent, data *copi
 			ContentHeader: message.ContentHeader{RawRepresentation: event},
 			Text:          data.Content,
 		}}
+		if data.ReasoningText != nil {
+			update.Contents = append(update.Contents, &message.TextReasoningContent{
+				ContentHeader: message.ContentHeader{RawRepresentation: event},
+				Text:          *data.ReasoningText,
+				ProtectedData: firstNonNilString(data.ReasoningOpaque, data.EncryptedContent),
+			})
+		}
 	}
 	return update
+}
+
+func (p *provider) assistantReasoningUpdate(event copilot.SessionEvent, data *copilot.AssistantReasoningData) *agent.ResponseUpdate {
+	content := &message.TextReasoningContent{
+		ContentHeader: message.ContentHeader{RawRepresentation: event},
+		Text:          data.Content,
+	}
+	return &agent.ResponseUpdate{
+		RawRepresentation: event,
+		Role:              message.RoleAssistant,
+		MessageID:         data.ReasoningID,
+		CreatedAt:         event.Timestamp,
+		Contents:          []message.Content{content},
+	}
+}
+
+func (p *provider) assistantReasoningDeltaUpdate(event copilot.SessionEvent, data *copilot.AssistantReasoningDeltaData) *agent.ResponseUpdate {
+	content := &message.TextReasoningContent{
+		ContentHeader: message.ContentHeader{RawRepresentation: event},
+		Text:          data.DeltaContent,
+	}
+	return &agent.ResponseUpdate{
+		RawRepresentation: event,
+		Role:              message.RoleAssistant,
+		MessageID:         data.ReasoningID,
+		CreatedAt:         event.Timestamp,
+		Contents:          []message.Content{content},
+	}
 }
 
 func (p *provider) toolExecutionStartUpdate(event copilot.SessionEvent, data *copilot.ToolExecutionStartData) *agent.ResponseUpdate {
@@ -555,6 +638,7 @@ func (p *provider) toolExecutionCompleteUpdate(event copilot.SessionEvent, data 
 		ContentHeader: message.ContentHeader{RawRepresentation: event},
 		CallID:        data.ToolCallID,
 		Result:        toolExecutionResult(data),
+		Error:         toolExecutionError(data),
 	}
 	return &agent.ResponseUpdate{
 		RawRepresentation: event,
@@ -578,6 +662,34 @@ func toolExecutionResult(data *copilot.ToolExecutionCompleteData) any {
 		return data.Error.Message
 	}
 	return "Tool execution failed"
+}
+
+// toolExecutionError maps a failed tool execution to the FunctionResultContent
+// failure channel, mirroring how the framework surfaces tool errors (frc.Error)
+// across providers. It returns nil for successful executions.
+func toolExecutionError(data *copilot.ToolExecutionCompleteData) error {
+	if data == nil {
+		return errors.New("tool execution failed")
+	}
+	if data.Success {
+		return nil
+	}
+	if data.Error != nil {
+		msg := data.Error.Message
+		code := ""
+		if data.Error.Code != nil {
+			code = *data.Error.Code
+		}
+		switch {
+		case msg != "" && code != "":
+			return fmt.Errorf("%s (%s)", msg, code)
+		case msg != "":
+			return errors.New(msg)
+		case code != "":
+			return fmt.Errorf("tool execution failed (%s)", code)
+		}
+	}
+	return errors.New("tool execution failed")
 }
 
 func (p *provider) assistantUsageUpdate(event copilot.SessionEvent, data *copilot.AssistantUsageData) *agent.ResponseUpdate {
@@ -628,6 +740,15 @@ func int64Value(value *int64) int64 {
 		return 0
 	}
 	return *value
+}
+
+func firstNonNilString(values ...*string) string {
+	for _, value := range values {
+		if value != nil {
+			return *value
+		}
+	}
+	return ""
 }
 
 func rawEventUpdate(event copilot.SessionEvent) *agent.ResponseUpdate {
