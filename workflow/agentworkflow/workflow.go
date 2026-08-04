@@ -459,30 +459,15 @@ func requestDataContent(req *workflow.ExternalRequest) (message.Content, bool) {
 	if req == nil {
 		return nil, false
 	}
-	// Disambiguate by the request's persisted TypeID before probing concrete
-	// types. A restored ToolApprovalRequestContent is delayed-deserialized as a
-	// json.RawMessage that also unmarshals cleanly into an empty
-	// FunctionCallContent (shared field names, unknown fields ignored, and the
-	// discarded "type" discriminator), so an unguarded As[*FunctionCallContent]
-	// probe would misresolve it to an empty FunctionCallContent. Matching the
-	// TypeID recorded when the request was created makes a restored request
-	// resolve to the same concrete type as a live one (whose concrete-pointer
-	// branch already rejects the wrong type).
-	switch req.Data.TypeID {
-	case toolApprovalRequestContentTypeID:
+	if req.Data.TypeID.Match(reflect.TypeFor[*message.ToolApprovalRequestContent]()) {
 		if data, ok := req.Data.As(reflect.TypeFor[*message.ToolApprovalRequestContent]()); ok {
 			return data.(*message.ToolApprovalRequestContent), true
 		}
-	case functionCallContentTypeID:
+	}
+	if req.Data.TypeID.Match(reflect.TypeFor[*message.FunctionCallContent]()) {
 		if data, ok := req.Data.As(reflect.TypeFor[*message.FunctionCallContent]()); ok {
 			return data.(*message.FunctionCallContent), true
 		}
-	}
-	if data, ok := req.Data.As(reflect.TypeFor[*message.FunctionCallContent]()); ok {
-		return data.(*message.FunctionCallContent), true
-	}
-	if data, ok := req.Data.As(reflect.TypeFor[*message.ToolApprovalRequestContent]()); ok {
-		return data.(*message.ToolApprovalRequestContent), true
 	}
 	content, ok := req.Data.Any().(message.Content)
 	return content, ok
