@@ -133,10 +133,12 @@ func (a *chatClient) run(ctx context.Context, messages []*message.Message, optio
 				})
 			}
 			if choice.Message.Content != "" {
-				contents = append(contents, &message.TextContent{Text: choice.Message.Content})
+				textContent := &message.TextContent{Text: choice.Message.Content}
+				populateChatAnnotations(choice.Message.Annotations, textContent)
+				contents = append(contents, textContent)
 			}
 			if choice.Message.Refusal != "" {
-				contents = append(contents, &message.ErrorContent{Message: choice.Message.Refusal})
+				contents = append(contents, &message.ErrorContent{Message: choice.Message.Refusal, ErrorCode: "Refusal"})
 			}
 			finishReason = choice.FinishReason
 		}
@@ -404,7 +406,37 @@ func buildMessageParam(msg *message.Message) ([]openai.ChatCompletionMessagePara
 					}
 				}
 			case *message.DataContent:
-				contents = append(contents, dataContentPart(c))
+				switch c.TopLevelMediaType() {
+				case "image":
+					contents = append(contents, openai.ChatCompletionContentPartUnionParam{
+						OfImageURL: &openai.ChatCompletionContentPartImageParam{
+							ImageURL: openai.ChatCompletionContentPartImageImageURLParam{
+								URL:    c.URI(),
+								Detail: imageDetail(c.AdditionalProperties),
+							},
+						},
+					})
+				case "audio":
+					var format string
+					switch c.MediaType {
+					case "audio/wav":
+						format = "wav"
+					case "audio/mp3", "audio/mpeg":
+						format = "mp3"
+					default:
+						// Default to mp3
+						format = "mp3"
+					}
+					contents = append(contents, openai.InputAudioContentPart(openai.ChatCompletionContentPartInputAudioInputAudioParam{
+						Data:   c.Data,
+						Format: format,
+					}))
+				default:
+					contents = append(contents, openai.FileContentPart(openai.ChatCompletionContentPartFileFileParam{
+						FileData: openai.String(c.Data),
+						Filename: openai.String(c.Name),
+					}))
+				}
 			case *message.HostedFileContent:
 				contents = append(contents, openai.FileContentPart(openai.ChatCompletionContentPartFileFileParam{
 					FileID: openai.String(c.FileID),
@@ -485,6 +517,24 @@ func buildMessageParam(msg *message.Message) ([]openai.ChatCompletionMessagePara
 	}
 }
 
+// populateChatAnnotations maps Chat Completions message annotations (e.g. the
+// url_citation entries produced by the web-search tool) onto the text content's
+// annotations, mirroring populateAnnotations on the Responses path.
+func populateChatAnnotations(anns []openai.ChatCompletionMessageAnnotation, content *message.TextContent) {
+	for _, ann := range anns {
+		// Only url_citation annotations carry a populated URLCitation payload;
+		// skip other variants (and empty URLs) to avoid emitting bogus citations.
+		if ann.Type != "url_citation" || ann.URLCitation.URL == "" {
+			continue
+		}
+		content.Annotations = append(content.Annotations, &message.CitationAnnotation{
+			URL:               ann.URLCitation.URL,
+			Title:             ann.URLCitation.Title,
+			RawRepresentation: ann,
+		})
+	}
+}
+
 func addUsage(contents []message.Content, usage openai.CompletionUsage) []message.Content {
 	details := message.UsageDetails{
 		InputTokenCount:       usage.PromptTokens,
@@ -492,18 +542,38 @@ func addUsage(contents []message.Content, usage openai.CompletionUsage) []messag
 		TotalTokenCount:       usage.TotalTokens,
 		CachedInputTokenCount: usage.PromptTokensDetails.CachedTokens,
 		ReasoningTokenCount:   usage.CompletionTokensDetails.ReasoningTokens,
-		AdditionalCounts:      make(map[string]int64),
 	}
-	details.AdditionalCounts["PromptTokensDetails.AudioTokens"] = usage.PromptTokensDetails.AudioTokens
-	details.AdditionalCounts["CompletionTokensDetails.AudioTokens"] = usage.CompletionTokensDetails.AudioTokens
-	details.AdditionalCounts["CompletionTokensDetails.AcceptedPredictionTokens"] = usage.CompletionTokensDetails.AcceptedPredictionTokens
-	details.AdditionalCounts["CompletionTokensDetails.RejectedPredictionTokens"] = usage.CompletionTokensDetails.RejectedPredictionTokens
+	add := func(k string, v int64) {
+		if v == 0 {
+			return
+		}
+		if details.AdditionalCounts == nil {
+			details.AdditionalCounts = make(map[string]int64)
+		}
+		details.AdditionalCounts[k] = v
+	}
+	add("PromptTokensDetails.AudioTokens", usage.PromptTokensDetails.AudioTokens)
+	add("CompletionTokensDetails.AudioTokens", usage.CompletionTokensDetails.AudioTokens)
+	add("CompletionTokensDetails.AcceptedPredictionTokens", usage.CompletionTokensDetails.AcceptedPredictionTokens)
+	add("CompletionTokensDetails.RejectedPredictionTokens", usage.CompletionTokensDetails.RejectedPredictionTokens)
 	return append(contents, &message.UsageContent{Details: details})
 }
 
 func imageDetail(props map[string]any) string {
 	if detail, ok := props["detail"]; ok {
 		if v, ok := detail.(string); ok {
+			return v
+		}
+	}
+	return ""
+}
+
+// imageFileID returns the string value of props["file_id"] or empty. This
+// allows an image referenced by an already-uploaded file to be forwarded to
+// the Responses API, mirroring the Python reference.
+func imageFileID(props map[string]any) string {
+	if id, ok := props["file_id"]; ok {
+		if v, ok := id.(string); ok {
 			return v
 		}
 	}
