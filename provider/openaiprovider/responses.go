@@ -130,6 +130,7 @@ func (a *responsesClient) run(ctx context.Context, messages []*message.Message, 
 				streamResp := a.client.Responses.GetStreaming(ctx, ct.ResponseID, responses.ResponseGetParams{
 					StartingAfter: openai.Int(ct.SequenceNumber),
 				}, telemetryRequestOption)
+				defer func() { _ = streamResp.Close() }()
 				// Update conversation ID when resuming
 				updateConversationID(ct.ResponseID)
 				for streamResp.Next() {
@@ -171,6 +172,7 @@ func (a *responsesClient) run(ctx context.Context, messages []*message.Message, 
 		if stream {
 			// Create streaming response
 			streamResp := a.client.Responses.NewStreaming(ctx, body, telemetryRequestOption)
+			defer func() { _ = streamResp.Close() }()
 			responseID := ""
 			createdAt := time.Time{}
 			isBackground, _ := agent.GetOption(options, agent.AllowBackgroundResponses)
@@ -410,10 +412,22 @@ func responsesBuildCompletionParams(config AgentConfig, messages []*message.Mess
 			params.Tools = append(params.Tools, responses.ToolUnionParam{
 				OfCodeInterpreter: &variant,
 			})
+			// The Responses API only populates the outputs field of a code_interpreter_call
+			// item (execution logs and generated images) when this include is requested.
+			if !slices.Contains(params.Include, responses.ResponseIncludableCodeInterpreterCallOutputs) {
+				params.Include = append(params.Include, responses.ResponseIncludableCodeInterpreterCallOutputs)
+			}
 		case *hostedtool.MCPServer:
 			var variant responses.ToolMcpParam
 			variant.ServerLabel = tl.ServerName
-			if _, err := url.Parse(tl.ServerAddress); err == nil {
+			// The Responses API accepts either a server_url (a full HTTP(S)
+			// endpoint) or a connector_id (a bare service-connector identifier
+			// such as "connector_googledrive"); the two are mutually exclusive.
+			// url.Parse only errors on control-char/malformed input, so it
+			// cannot distinguish the two. Discriminate on an actual URL scheme
+			// instead, routing scheme-bearing addresses to server_url and bare
+			// connector IDs to connector_id.
+			if u, err := url.Parse(tl.ServerAddress); err == nil && (u.Scheme == "http" || u.Scheme == "https") {
 				variant.ServerURL = openai.String(tl.ServerAddress)
 			} else {
 				variant.ConnectorID = tl.ServerAddress
@@ -485,11 +499,15 @@ func responsesBuildMessageParam(msg *message.Message, resp responses.ResponseInp
 			case *message.URIContent:
 				switch c.TopLevelMediaType() {
 				case "image":
+					img := responses.ResponseInputImageParam{
+						ImageURL: openai.String(c.URI),
+						Detail:   responses.ResponseInputImageDetail(imageDetail(c.AdditionalProperties)),
+					}
+					if id := imageFileID(c.AdditionalProperties); id != "" {
+						img.FileID = openai.String(id)
+					}
 					contents = append(contents, responses.ResponseInputContentUnionParam{
-						OfInputImage: &responses.ResponseInputImageParam{
-							ImageURL: openai.String(c.URI),
-							Detail:   responses.ResponseInputImageDetail(imageDetail(c.AdditionalProperties)),
-						},
+						OfInputImage: &img,
 					})
 				default:
 					contents = append(contents, responses.ResponseInputContentUnionParam{
@@ -501,11 +519,15 @@ func responsesBuildMessageParam(msg *message.Message, resp responses.ResponseInp
 			case *message.DataContent:
 				switch c.TopLevelMediaType() {
 				case "image":
+					img := responses.ResponseInputImageParam{
+						ImageURL: openai.String(c.URI()),
+						Detail:   responses.ResponseInputImageDetail(imageDetail(c.AdditionalProperties)),
+					}
+					if id := imageFileID(c.AdditionalProperties); id != "" {
+						img.FileID = openai.String(id)
+					}
 					contents = append(contents, responses.ResponseInputContentUnionParam{
-						OfInputImage: &responses.ResponseInputImageParam{
-							ImageURL: openai.String(c.URI()),
-							Detail:   responses.ResponseInputImageDetail(imageDetail(c.AdditionalProperties)),
-						},
+						OfInputImage: &img,
 					})
 				default:
 					file := responses.ResponseInputFileParam{
@@ -917,6 +939,9 @@ func responsesProcessResponse(resp *responses.Response, seqNum int64, yield func
 		case responses.ResponseOutputItemMcpApprovalRequest:
 			currentUpdate.Contents = append(currentUpdate.Contents, mcpApprovalRequestContent(out))
 
+		case responses.ResponseOutputItemMcpCall:
+			currentUpdate.Contents = append(currentUpdate.Contents, mcpCallContents(out)...)
+
 		case responses.ResponseOutputItemImageGenerationCall:
 			if content := imageGenerationContent(out); content != nil {
 				currentUpdate.Contents = append(currentUpdate.Contents, content)
@@ -1155,9 +1180,28 @@ func responsesProcessStreamingUpdate(update responses.ResponseStreamEventUnion, 
 			u.Contents = []message.Content{content}
 		case responses.ResponseOutputItemMcpApprovalRequest:
 			u.Contents = []message.Content{mcpApprovalRequestContent(item)}
+		case responses.ResponseOutputItemMcpCall:
+			u.Contents = mcpCallContents(item)
 		case responses.ResponseOutputItemImageGenerationCall:
 			if content := imageGenerationContent(item); content != nil {
 				u.Contents = []message.Content{content}
+			}
+		case responses.ResponseReasoningItem:
+			// Carry the completed reasoning item's encrypted content so it can be
+			// replayed on the next turn when store=false (reasoning delta events only
+			// carry text and drop EncryptedContent). Mirrors the non-streaming handler.
+			var sb strings.Builder
+			for _, c := range item.Content {
+				sb.WriteString(c.Text)
+			}
+			u.Contents = []message.Content{
+				&message.TextReasoningContent{
+					Text:          sb.String(),
+					ProtectedData: item.EncryptedContent,
+					ContentHeader: message.ContentHeader{
+						RawRepresentation: item,
+					},
+				},
 			}
 		default:
 			u = createUpdate(message.RoleAssistant, nil)
@@ -1197,6 +1241,42 @@ func mcpApprovalRequestContent(item responses.ResponseOutputItemMcpApprovalReque
 	}
 }
 
+// mcpCallContents surfaces a completed hosted MCP tool call, emitting both the
+// call (from its arguments) and its result so the output is not silently
+// dropped. Any tool-call error is surfaced as an ErrorContent.
+func mcpCallContents(item responses.ResponseOutputItemMcpCall) []message.Content {
+	contents := []message.Content{
+		&message.MCPServerToolCallContent{
+			ContentHeader: message.ContentHeader{RawRepresentation: item},
+			Arguments:     item.Arguments,
+			CallID:        item.ID,
+			Name:          item.Name,
+			ServerName:    item.ServerLabel,
+		},
+	}
+
+	result := &message.MCPServerToolResultContent{
+		ContentHeader: message.ContentHeader{RawRepresentation: item},
+		CallID:        item.ID,
+		Name:          item.Name,
+		ServerName:    item.ServerLabel,
+		Error:         item.Error,
+	}
+	if item.Output != "" {
+		result.Outputs = message.Contents{
+			&message.TextContent{Text: item.Output},
+		}
+	}
+	contents = append(contents, result)
+
+	if item.Error != "" {
+		contents = append(contents, &message.ErrorContent{
+			Message: item.Error,
+		})
+	}
+	return contents
+}
+
 func imageGenerationContent(item responses.ResponseOutputItemImageGenerationCall) *message.DataContent {
 	if item.Result == "" {
 		return nil
@@ -1219,11 +1299,27 @@ func populateAnnotations(anns []responses.ResponseOutputTextAnnotationUnion, con
 		case responses.ResponseOutputTextAnnotationFileCitation:
 			content.Annotations = append(content.Annotations, &message.CitationAnnotation{
 				FileID:            a.FileID,
+				Title:             a.Filename,
 				RawRepresentation: a,
 			})
 		case responses.ResponseOutputTextAnnotationURLCitation:
 			content.Annotations = append(content.Annotations, &message.CitationAnnotation{
+				Title:             a.Title,
 				URL:               a.URL,
+				AnnotatedRegions:  message.AnnotatedRegions{&message.TextSpanAnnotatedRegion{Start: int(a.StartIndex), End: int(a.EndIndex)}},
+				RawRepresentation: a,
+			})
+		case responses.ResponseOutputTextAnnotationContainerFileCitation:
+			content.Annotations = append(content.Annotations, &message.CitationAnnotation{
+				FileID:               a.FileID,
+				Title:                a.Filename,
+				AnnotatedRegions:     message.AnnotatedRegions{&message.TextSpanAnnotatedRegion{Start: int(a.StartIndex), End: int(a.EndIndex)}},
+				AdditionalProperties: map[string]any{"ContainerId": a.ContainerID},
+				RawRepresentation:    a,
+			})
+		case responses.ResponseOutputTextAnnotationFilePath:
+			content.Annotations = append(content.Annotations, &message.CitationAnnotation{
+				FileID:            a.FileID,
 				RawRepresentation: a,
 			})
 		}
