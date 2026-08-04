@@ -373,6 +373,10 @@ type pendingToolCall struct {
 
 type toolCallAccumulator struct {
 	pending map[string]*pendingToolCall
+	// lastChunkMessageID is the MessageID of the most recent
+	// TextMessageChunkEvent that carried one. Chunks that omit MessageID
+	// continue that message.
+	lastChunkMessageID string
 }
 
 func (a *toolCallAccumulator) onEvent(evt aguiEvents.Event) ([]*agent.ResponseUpdate, error) {
@@ -414,6 +418,24 @@ func (a *toolCallAccumulator) onEvent(evt aguiEvents.Event) ([]*agent.ResponseUp
 			MessageID: e.MessageID,
 			CreatedAt: eventTime(evt),
 			Contents:  message.Contents{&message.TextContent{Text: e.Delta}},
+		}}, nil
+	case *aguiEvents.TextMessageChunkEvent:
+		delta := deref(e.Delta)
+		if delta == "" {
+			return nil, nil
+		}
+		// A chunk may omit MessageID to continue the current text message.
+		// Reuse the last seen chunk MessageID so the collector groups the
+		// delta with its message instead of merging it into an unrelated
+		// last message (see agent.Response.targetMessage).
+		if id := deref(e.MessageID); id != "" {
+			a.lastChunkMessageID = id
+		}
+		return []*agent.ResponseUpdate{{
+			Role:      message.RoleAssistant,
+			MessageID: a.lastChunkMessageID,
+			CreatedAt: eventTime(evt),
+			Contents:  message.Contents{&message.TextContent{Text: delta}},
 		}}, nil
 	case *aguiEvents.ReasoningMessageContentEvent:
 		return []*agent.ResponseUpdate{{
@@ -478,6 +500,14 @@ func (a *toolCallAccumulator) onEvent(evt aguiEvents.Event) ([]*agent.ResponseUp
 			Role:      message.RoleAssistant,
 			CreatedAt: eventTime(evt),
 			Contents:  message.Contents{newJSONDataContent(e.Delta, "application/json-patch+json")},
+		}}, nil
+	case *aguiEvents.MessagesSnapshotEvent:
+		return []*agent.ResponseUpdate{{
+			Role:      message.RoleAssistant,
+			CreatedAt: eventTime(evt),
+			AdditionalProperties: map[string]any{
+				"agui_messages_snapshot": e.Messages,
+			},
 		}}, nil
 	default:
 		return nil, nil
