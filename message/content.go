@@ -35,6 +35,7 @@ func init() {
 		&ToolApprovalResponseContent{},
 		&AlwaysApproveToolApprovalResponseContent{},
 		&MCPServerToolCallContent{},
+		&MCPServerToolResultContent{},
 	} {
 		supportedContents[c.kind()] = reflect.TypeOf(c).Elem()
 	}
@@ -89,7 +90,8 @@ func unmarshalRawContent(data json.RawMessage) (Content, error) {
 	return &raw, nil
 }
 
-// Text returns the first text content in the response, or empty string.
+// Text returns the concatenation of the Text of all [TextContent] items in the
+// Contents, or the empty string if there are none.
 func (cs Contents) Text() string {
 	var sb strings.Builder
 	for _, c := range cs {
@@ -100,6 +102,7 @@ func (cs Contents) Text() string {
 	return sb.String()
 }
 
+// Usage sums the UsageDetails of every UsageContent in the slice, returning the aggregate token usage (a zero UsageDetails if none is present).
 func (cs Contents) Usage() UsageDetails {
 	var usage UsageDetails
 	for _, c := range cs {
@@ -234,6 +237,7 @@ func (t *DataContent) Bytes() ([]byte, error) {
 	return base64.StdEncoding.DecodeString(t.Data)
 }
 
+// TopLevelMediaType returns the normalized (lowercased, whitespace-trimmed) top-level part of the content's MediaType - the portion before the / (for example image for image/png). If MediaType contains no /, the whole normalized value is returned; if MediaType is unset, it returns an empty string.
 func (t *DataContent) TopLevelMediaType() string {
 	return topLevelMediaType(t.MediaType)
 }
@@ -290,6 +294,35 @@ func (t *MCPServerToolCallContent) GetCallID() string {
 
 func (t *MCPServerToolCallContent) MarshalJSON() ([]byte, error) {
 	type alias MCPServerToolCallContent
+	tmp := struct {
+		*alias
+		Type contentKind
+	}{
+		alias: (*alias)(t),
+		Type:  t.kind(),
+	}
+	return json.Marshal(tmp)
+}
+
+// MCPServerToolResultContent represents the result of a tool call executed by
+// a hosted MCP server.
+//
+// It mirrors MCPServerToolCallContent and conveys the outputs (and any error)
+// produced when a hosted service runs an MCP server tool.
+type MCPServerToolResultContent struct {
+	ContentHeader
+
+	CallID     string
+	Name       string
+	ServerName string   `json:",omitempty"`
+	Outputs    Contents `json:",omitempty"`
+	Error      string   `json:",omitempty"`
+}
+
+func (t MCPServerToolResultContent) kind() contentKind { return "mcpServerToolResult" }
+
+func (t *MCPServerToolResultContent) MarshalJSON() ([]byte, error) {
+	type alias MCPServerToolResultContent
 	tmp := struct {
 		*alias
 		Type contentKind
@@ -410,6 +443,7 @@ type HostedFileContent struct {
 	MediaType string `json:",omitempty"`
 }
 
+// TopLevelMediaType returns the normalized (lowercased, whitespace-trimmed) top-level part of the content's MediaType - the portion before the / (for example image for image/png). If MediaType contains no /, the whole normalized value is returned; if MediaType is unset, it returns an empty string.
 func (t *HostedFileContent) TopLevelMediaType() string {
 	return topLevelMediaType(t.MediaType)
 }
@@ -518,6 +552,9 @@ type URIContent struct {
 	URI       string
 }
 
+// NewURIContent creates a [URIContent] for the given URI. When mediaType is
+// empty it is inferred from the URI; a non-empty mediaType is validated. It
+// returns an error if the URI is invalid or the media type is malformed.
 func NewURIContent(uri string, mediaType string) (*URIContent, error) {
 	if err := validateURIContentURI(uri); err != nil {
 		return nil, err
@@ -530,6 +567,7 @@ func NewURIContent(uri string, mediaType string) (*URIContent, error) {
 	return &URIContent{URI: uri, MediaType: mediaType}, nil
 }
 
+// TopLevelMediaType returns the normalized (lowercased, whitespace-trimmed) top-level part of the content's MediaType - the portion before the / (for example image for image/png). If MediaType contains no /, the whole normalized value is returned; if MediaType is unset, it returns an empty string.
 func (t *URIContent) TopLevelMediaType() string {
 	return topLevelMediaType(t.MediaType)
 }
@@ -558,6 +596,7 @@ type UsageDetails struct {
 	ReasoningTokenCount   int64
 }
 
+// Add accumulates other into u, summing each token count field and merging AdditionalCounts (allocating the map on first use).
 func (u *UsageDetails) Add(other UsageDetails) {
 	u.InputTokenCount += other.InputTokenCount
 	u.OutputTokenCount += other.OutputTokenCount
@@ -648,6 +687,10 @@ func (t *ToolApprovalRequestContent) UnmarshalJSON(data []byte) error {
 
 func (t ToolApprovalRequestContent) kind() contentKind { return "toolApprovalRequest" }
 
+// CreateResponse builds a [ToolApprovalResponseContent] that approves or rejects this
+// request. It carries over the RequestID, records the decision and reason, and clones the
+// pending tool call along with the AdditionalProperties and Annotations of the content
+// header. Note that RawRepresentation is copied by reference.
 func (t *ToolApprovalRequestContent) CreateResponse(approved bool, reason string) *ToolApprovalResponseContent {
 	return &ToolApprovalResponseContent{
 		RequestID: t.RequestID,
@@ -700,7 +743,7 @@ func (t *ToolApprovalRequestContent) AlwaysApproveToolResponse() *AlwaysApproveT
 	return &AlwaysApproveToolApprovalResponseContent{
 		InnerResponse:     t.CreateResponse(true, ""),
 		AlwaysApproveTool: true,
-		ContentHeader:     ContentHeader{AdditionalProperties: t.AdditionalProperties},
+		ContentHeader:     ContentHeader{AdditionalProperties: maps.Clone(t.AdditionalProperties)},
 	}
 }
 
@@ -711,7 +754,7 @@ func (t *ToolApprovalRequestContent) AlwaysApproveToolWithArgumentsResponse() *A
 	return &AlwaysApproveToolApprovalResponseContent{
 		InnerResponse:                  t.CreateResponse(true, ""),
 		AlwaysApproveToolWithArguments: true,
-		ContentHeader:                  ContentHeader{AdditionalProperties: t.AdditionalProperties},
+		ContentHeader:                  ContentHeader{AdditionalProperties: maps.Clone(t.AdditionalProperties)},
 	}
 }
 
@@ -843,6 +886,7 @@ func (t AlwaysApproveToolApprovalResponseContent) kind() contentKind {
 	return "alwaysApproveToolApprovalResponse"
 }
 
+// CodeInterpreterToolCallContent represents a call to a hosted code-interpreter tool, correlated by CallID, whose Inputs hold the submitted code or content.
 type CodeInterpreterToolCallContent struct {
 	ContentHeader
 
@@ -864,6 +908,7 @@ func (t *CodeInterpreterToolCallContent) MarshalJSON() ([]byte, error) {
 
 func (t CodeInterpreterToolCallContent) kind() contentKind { return "codeInterpreterToolCall" }
 
+// CodeInterpreterToolResultContent represents the result of a hosted code-interpreter tool call, correlated by CallID, whose Outputs hold the produced content.
 type CodeInterpreterToolResultContent struct {
 	ContentHeader
 
