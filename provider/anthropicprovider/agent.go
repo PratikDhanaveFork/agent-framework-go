@@ -117,14 +117,17 @@ func (a *client) run(ctx context.Context, messages []*message.Message, options .
 				MessageID:         resp.ID,
 				ResponseID:        resp.ID,
 				CreatedAt:         time.Now(),
+				FinishReason:      mapStopReason(resp.StopReason),
 				RawRepresentation: resp,
 			}, nil)
 		}
 	}
 	return func(yield func(*agent.ResponseUpdate, error) bool) {
 		stream := a.client.Messages.NewStreaming(ctx, params)
+		defer func() { _ = stream.Close() }()
 
 		var messageID string
+		var finishReason string
 		var usage message.UsageDetails
 		var accumulated anthropic.Message
 
@@ -150,6 +153,11 @@ func (a *client) run(ctx context.Context, messages []*message.Message, options .
 				usage.OutputTokenCount = delta.OutputTokenCount
 				usage.ReasoningTokenCount = delta.ReasoningTokenCount
 				usage.TotalTokenCount = usage.InputTokenCount + usage.OutputTokenCount
+				// Later chunks may carry an empty stop_reason; don't clobber a
+				// value we already captured.
+				if fr := mapStopReason(event.Delta.StopReason); fr != "" {
+					finishReason = fr
+				}
 			case anthropic.ContentBlockStartEvent:
 				block := event.ContentBlock.AsAny()
 				if _, isToolUse := block.(anthropic.ToolUseBlock); !isToolUse {
@@ -158,12 +166,27 @@ func (a *client) run(ctx context.Context, messages []*message.Message, options .
 			case anthropic.ContentBlockDeltaEvent:
 				contents = a.buildDelta(event.Delta.AsAny(), contents)
 			case anthropic.ContentBlockStopEvent:
-				if block, ok := accumulated.Content[event.Index].AsAny().(anthropic.ToolUseBlock); ok {
+				switch block := accumulated.Content[event.Index].AsAny().(type) {
+				case anthropic.ToolUseBlock:
 					contents = append(contents, &message.FunctionCallContent{
 						CallID:    block.ID,
 						Name:      block.Name,
 						Arguments: string(block.Input),
 					})
+				case anthropic.TextBlock:
+					// The text itself is streamed incrementally via TextDelta, but
+					// citations are only available on the accumulated block. Emit an
+					// annotations-only TextContent (empty Text avoids duplicating the
+					// streamed text) so streamed responses carry the same citation
+					// annotations as the non-streaming path.
+					if annotations := citationAnnotations(block.Citations); annotations != nil {
+						contents = append(contents, &message.TextContent{
+							ContentHeader: message.ContentHeader{
+								Annotations:       annotations,
+								RawRepresentation: block,
+							},
+						})
+					}
 				}
 			}
 
@@ -178,10 +201,15 @@ func (a *client) run(ctx context.Context, messages []*message.Message, options .
 				return
 			}
 		}
+		if err := stream.Err(); err != nil {
+			yield(nil, err)
+			return
+		}
 		if !yield(&agent.ResponseUpdate{
-			CreatedAt: time.Now(),
-			Role:      message.RoleAssistant,
-			MessageID: messageID,
+			CreatedAt:    time.Now(),
+			Role:         message.RoleAssistant,
+			MessageID:    messageID,
+			FinishReason: finishReason,
 			Contents: []message.Content{
 				&message.UsageContent{
 					Details: usage,
@@ -190,9 +218,24 @@ func (a *client) run(ctx context.Context, messages []*message.Message, options .
 		}, nil) {
 			return
 		}
-		if err := stream.Err(); err != nil {
-			yield(nil, err)
-		}
+	}
+}
+
+// mapStopReason maps an Anthropic stop_reason to the canonical FinishReason
+// values shared across providers (mirroring the OpenAI/Copilot providers). It
+// returns "" for empty or unrecognized reasons so callers can fall through.
+func mapStopReason(reason anthropic.StopReason) string {
+	switch reason {
+	case anthropic.StopReasonEndTurn, anthropic.StopReasonStopSequence, anthropic.StopReasonPauseTurn:
+		return "stop"
+	case anthropic.StopReasonMaxTokens:
+		return "length"
+	case anthropic.StopReasonToolUse:
+		return "tool_calls"
+	case anthropic.StopReasonRefusal:
+		return "content_filter"
+	default:
+		return ""
 	}
 }
 
@@ -224,20 +267,10 @@ func toUsageDetailsDelta(usage anthropic.MessageDeltaUsage) message.UsageDetails
 func (a *client) buildBlock(index int, v any, contents []message.Content, functions map[int]*message.FunctionCallContent) []message.Content {
 	switch v := v.(type) {
 	case anthropic.TextBlock:
-		var annotations []message.Annotation
-		for _, citation := range v.Citations {
-			annotations = append(annotations, &message.CitationAnnotation{
-				FileID:            citation.FileID,
-				Snippet:           citation.CitedText,
-				Title:             cmp.Or(citation.DocumentTitle, citation.Title),
-				URL:               citation.URL,
-				RawRepresentation: citation,
-			})
-		}
 		contents = append(contents, &message.TextContent{
 			Text: v.Text,
 			ContentHeader: message.ContentHeader{
-				Annotations:       annotations,
+				Annotations:       citationAnnotations(v.Citations),
 				RawRepresentation: v,
 			},
 		})
@@ -264,6 +297,23 @@ func (a *client) buildBlock(index int, v any, contents []message.Content, functi
 		}
 	}
 	return contents
+}
+
+// citationAnnotations converts Anthropic text-block citations into
+// [message.CitationAnnotation] values. It returns nil when there are no
+// citations so callers can leave the annotations slice unset.
+func citationAnnotations(citations []anthropic.TextCitationUnion) []message.Annotation {
+	var annotations []message.Annotation
+	for _, citation := range citations {
+		annotations = append(annotations, &message.CitationAnnotation{
+			FileID:            citation.FileID,
+			Snippet:           citation.CitedText,
+			Title:             cmp.Or(citation.DocumentTitle, citation.Title),
+			URL:               citation.URL,
+			RawRepresentation: citation,
+		})
+	}
+	return annotations
 }
 
 func (a *client) buildDelta(v any, contents []message.Content) []message.Content {
