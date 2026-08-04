@@ -101,6 +101,13 @@ func (a *a2aProvider) run(ctx context.Context, messages []*message.Message, opti
 			if stream {
 				seq = a.client.SendStreamingMessage(ctx, params)
 			} else {
+				// Mirror .NET A2AAgent.RunCoreAsync, which sets the send
+				// configuration only on the non-streaming send. Only set Config
+				// when background responses are explicitly enabled so the wire
+				// request stays unchanged (Config nil) in the default case.
+				if allowBackground, _ := agent.GetOption(options, agent.AllowBackgroundResponses); allowBackground {
+					params.Config = &a2a.SendMessageConfig{ReturnImmediately: true}
+				}
 				resp, err := a.client.SendMessage(ctx, params)
 				seq = func(yield func(a2a.Event, error) bool) {
 					yield(resp, err)
@@ -215,7 +222,11 @@ func sendMsg(session *agent.Session, seq iter.Seq2[a2a.Event, error], yield func
 				yield(nil, err)
 				return
 			}
-			update := newResponseUpdate(e, e.Metadata, string(e.TaskID), string(e.Artifact.ID), message.RoleAssistant, contents, time.Now())
+			// Surface the artifact's own metadata alongside the event-level
+			// metadata, matching .NET's A2A conversion which folds artifact
+			// metadata into the resulting message.
+			metadata := mergeMetadata(e.Metadata, e.Artifact.Metadata)
+			update := newResponseUpdate(e, metadata, string(e.TaskID), string(e.Artifact.ID), message.RoleAssistant, contents, time.Now())
 			if !yield(update, nil) {
 				return
 			}
@@ -252,6 +263,27 @@ func newResponseUpdate(raw any, additionalProperties map[string]any, responseID,
 	}
 }
 
+// mergeMetadata combines a base metadata map with additional maps into a new
+// map, cloning so the inputs are never mutated. Keys from later maps take
+// precedence over earlier ones. It returns nil when every source is empty, so a
+// task with no metadata yields no metadata map rather than an empty one.
+func mergeMetadata(base map[string]any, extra ...map[string]any) map[string]any {
+	var merged map[string]any
+	if len(base) > 0 {
+		merged = maps.Clone(base)
+	}
+	for _, m := range extra {
+		if len(m) == 0 {
+			continue
+		}
+		if merged == nil {
+			merged = make(map[string]any, len(m))
+		}
+		maps.Copy(merged, m)
+	}
+	return merged
+}
+
 func yieldTask(yield func(*agent.ResponseUpdate, error) bool, task *a2a.Task) bool {
 	now := time.Now()
 	var continuationToken string
@@ -280,6 +312,7 @@ func yieldTask(yield func(*agent.ResponseUpdate, error) bool, task *a2a.Task) bo
 			}
 		}
 	}
+	artifactMetadata := make([]map[string]any, 0, len(task.Artifacts))
 	for _, artifact := range task.Artifacts {
 		var err error
 		contents, err = partsToContents(artifact.Parts, contents)
@@ -287,9 +320,14 @@ func yieldTask(yield func(*agent.ResponseUpdate, error) bool, task *a2a.Task) bo
 			yield(nil, err)
 			return false
 		}
+		artifactMetadata = append(artifactMetadata, artifact.Metadata)
 	}
 
-	update := newResponseUpdate(task, task.Metadata, string(task.ID), messageID, message.RoleAssistant, contents, timestamp)
+	// Fold each artifact's own metadata into the update alongside the
+	// task-level metadata, matching .NET's A2A conversion which preserves
+	// artifact metadata rather than dropping it.
+	metadata := mergeMetadata(task.Metadata, artifactMetadata...)
+	update := newResponseUpdate(task, metadata, string(task.ID), messageID, message.RoleAssistant, contents, timestamp)
 	update.ContinuationToken = continuationToken
 	return yield(update, nil)
 }
@@ -301,7 +339,7 @@ func updateSessionContextID(session *agent.Session, contextID, taskID string, ta
 	// Surface cases where the A2A agent responds with a response that
 	// has a different context ID than the session's context ID.
 	currentContextID := getContextID(session)
-	if currentContextID != "" && currentContextID != contextID {
+	if currentContextID != "" && contextID != "" && currentContextID != contextID {
 		return fmt.Errorf("mismatched context ID: session has %q but A2A response has %q", currentContextID, contextID)
 	}
 	setContextID(session, contextID)
