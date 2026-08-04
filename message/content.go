@@ -91,8 +91,6 @@ func unmarshalRawContent(data json.RawMessage) (Content, error) {
 	return &raw, nil
 }
 
-// Text returns the concatenated text of all TextContent in the response,
-// or empty string if there is none.
 // Text returns the concatenation of the Text of all [TextContent] items in the
 // Contents, or the empty string if there are none.
 func (cs Contents) Text() string {
