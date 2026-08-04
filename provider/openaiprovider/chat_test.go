@@ -197,12 +197,6 @@ func TestChatBasicRequestResponse_NonStreaming(t *testing.T) {
 						TotalTokenCount:       17,
 						CachedInputTokenCount: 13,
 						ReasoningTokenCount:   90,
-						AdditionalCounts: map[string]int64{
-							"PromptTokensDetails.AudioTokens":                  0,
-							"CompletionTokensDetails.AudioTokens":              0,
-							"CompletionTokensDetails.AcceptedPredictionTokens": 0,
-							"CompletionTokensDetails.RejectedPredictionTokens": 0,
-						},
 					},
 				},
 			},
@@ -229,6 +223,146 @@ func TestChatBasicRequestResponse_NonStreaming(t *testing.T) {
 	}
 	if resp.FinishReason != "stop" {
 		t.Errorf("expected FinishReason stop, got %q", resp.FinishReason)
+	}
+}
+
+func TestChatURLCitationAnnotations_NonStreaming(t *testing.T) {
+	const input = `
+            {
+                "messages":[{"role":"user","content":"hello"}],
+                "model":"gpt-4o-mini"
+            }
+            `
+	const output = `
+            {
+              "id": "chatcmpl-URLCIT",
+              "object": "chat.completion",
+              "created": 1727888631,
+              "model": "gpt-4o-mini-2024-07-18",
+              "choices": [
+                {
+                  "index": 0,
+                  "message": {
+                    "role": "assistant",
+                    "content": "See Example.",
+                    "annotations": [
+                      {
+                        "type": "url_citation",
+                        "url_citation": {
+                          "url": "https://example.com",
+                          "title": "Example",
+                          "start_index": 4,
+                          "end_index": 11
+                        }
+                      }
+                    ]
+                  },
+                  "logprobs": null,
+                  "finish_reason": "stop"
+                }
+              ]
+            }
+            `
+
+	server := newTestServer(t, input, output)
+	defer server.Close()
+
+	a := newTestClient(server)
+
+	resp, err := a.RunText(t.Context(), "hello").Collect()
+	if err != nil {
+		t.Fatalf("error = %v", err)
+	}
+
+	var text *message.TextContent
+	for _, msg := range resp.Messages {
+		for _, c := range msg.Contents {
+			if tc, ok := c.(*message.TextContent); ok {
+				text = tc
+			}
+		}
+	}
+	if text == nil {
+		t.Fatalf("no TextContent in response")
+	}
+	if len(text.Annotations) != 1 {
+		t.Fatalf("expected 1 annotation, got %d", len(text.Annotations))
+	}
+	citation, ok := text.Annotations[0].(*message.CitationAnnotation)
+	if !ok {
+		t.Fatalf("expected *message.CitationAnnotation, got %T", text.Annotations[0])
+	}
+	if citation.URL != "https://example.com" {
+		t.Errorf("expected URL https://example.com, got %q", citation.URL)
+	}
+	if citation.Title != "Example" {
+		t.Errorf("expected Title Example, got %q", citation.Title)
+	}
+}
+
+func TestChatURLCitationAnnotations_SkipsEmptyURL(t *testing.T) {
+	const input = `
+            {
+                "messages":[{"role":"user","content":"hello"}],
+                "model":"gpt-4o-mini"
+            }
+            `
+	// An annotation whose url_citation payload has an empty URL must not
+	// produce a bogus CitationAnnotation.
+	const output = `
+            {
+              "id": "chatcmpl-URLCIT-EMPTY",
+              "object": "chat.completion",
+              "created": 1727888631,
+              "model": "gpt-4o-mini-2024-07-18",
+              "choices": [
+                {
+                  "index": 0,
+                  "message": {
+                    "role": "assistant",
+                    "content": "No citation.",
+                    "annotations": [
+                      {
+                        "type": "url_citation",
+                        "url_citation": {
+                          "url": "",
+                          "title": "",
+                          "start_index": 0,
+                          "end_index": 0
+                        }
+                      }
+                    ]
+                  },
+                  "logprobs": null,
+                  "finish_reason": "stop"
+                }
+              ]
+            }
+            `
+
+	server := newTestServer(t, input, output)
+	defer server.Close()
+
+	a := newTestClient(server)
+
+	resp, err := a.RunText(t.Context(), "hello").Collect()
+	if err != nil {
+		t.Fatalf("error = %v", err)
+	}
+
+	var text *message.TextContent
+	for _, msg := range resp.Messages {
+		for _, c := range msg.Contents {
+			if tc, ok := c.(*message.TextContent); ok {
+				text = tc
+			}
+		}
+	}
+	if text == nil {
+		t.Fatalf("no TextContent in response")
+	}
+	if len(text.Annotations) != 0 {
+		t.Fatalf("expected 0 annotations, got %d", len(text.Annotations))
 	}
 }
 
@@ -306,10 +440,8 @@ data: [DONE]
 			CachedInputTokenCount: 5,
 			ReasoningTokenCount:   90,
 			AdditionalCounts: map[string]int64{
-				"PromptTokensDetails.AudioTokens":                  123,
-				"CompletionTokensDetails.AudioTokens":              456,
-				"CompletionTokensDetails.AcceptedPredictionTokens": 0,
-				"CompletionTokensDetails.RejectedPredictionTokens": 0,
+				"PromptTokensDetails.AudioTokens":     123,
+				"CompletionTokensDetails.AudioTokens": 456,
 			},
 		}}}},
 	}
@@ -458,10 +590,8 @@ func TestChatMultipleMessages_NonStreaming(t *testing.T) {
 						CachedInputTokenCount: 13,
 						ReasoningTokenCount:   90,
 						AdditionalCounts: map[string]int64{
-							"PromptTokensDetails.AudioTokens":                  123,
-							"CompletionTokensDetails.AudioTokens":              456,
-							"CompletionTokensDetails.AcceptedPredictionTokens": 0,
-							"CompletionTokensDetails.RejectedPredictionTokens": 0,
+							"PromptTokensDetails.AudioTokens":     123,
+							"CompletionTokensDetails.AudioTokens": 456,
 						},
 					},
 				},
@@ -574,12 +704,6 @@ func TestChatMultiPartSystemMessage_NonStreaming(t *testing.T) {
 						TotalTokenCount:       57,
 						CachedInputTokenCount: 13,
 						ReasoningTokenCount:   90,
-						AdditionalCounts: map[string]int64{
-							"PromptTokensDetails.AudioTokens":                  0,
-							"CompletionTokensDetails.AudioTokens":              0,
-							"CompletionTokensDetails.AcceptedPredictionTokens": 0,
-							"CompletionTokensDetails.RejectedPredictionTokens": 0,
-						},
 					},
 				},
 			},
@@ -680,12 +804,6 @@ func TestChatEmptyAssistantMessage_NonStreaming(t *testing.T) {
 						TotalTokenCount:       57,
 						CachedInputTokenCount: 13,
 						ReasoningTokenCount:   90,
-						AdditionalCounts: map[string]int64{
-							"PromptTokensDetails.AudioTokens":                  0,
-							"CompletionTokensDetails.AudioTokens":              0,
-							"CompletionTokensDetails.AcceptedPredictionTokens": 0,
-							"CompletionTokensDetails.RejectedPredictionTokens": 0,
-						},
 					},
 				},
 			},
@@ -807,12 +925,6 @@ func TestChatFunctionCallContent_NonStreaming(t *testing.T) {
 						TotalTokenCount:       77,
 						CachedInputTokenCount: 13,
 						ReasoningTokenCount:   90,
-						AdditionalCounts: map[string]int64{
-							"PromptTokensDetails.AudioTokens":                  0,
-							"CompletionTokensDetails.AudioTokens":              0,
-							"CompletionTokensDetails.AcceptedPredictionTokens": 0,
-							"CompletionTokensDetails.RejectedPredictionTokens": 0,
-						},
 					},
 				},
 			},
@@ -924,12 +1036,6 @@ data: [DONE]
 				TotalTokenCount:       77,
 				CachedInputTokenCount: 0,
 				ReasoningTokenCount:   90,
-				AdditionalCounts: map[string]int64{
-					"PromptTokensDetails.AudioTokens":                  0,
-					"CompletionTokensDetails.AudioTokens":              0,
-					"CompletionTokensDetails.AcceptedPredictionTokens": 0,
-					"CompletionTokensDetails.RejectedPredictionTokens": 0,
-				},
 			}},
 		}},
 	}
@@ -1066,12 +1172,6 @@ func TestChatAssistantMessageWithBothToolsAndContent_NonStreaming(t *testing.T) 
 						TotalTokenCount:       57,
 						CachedInputTokenCount: 20,
 						ReasoningTokenCount:   90,
-						AdditionalCounts: map[string]int64{
-							"PromptTokensDetails.AudioTokens":                  0,
-							"CompletionTokensDetails.AudioTokens":              0,
-							"CompletionTokensDetails.AcceptedPredictionTokens": 0,
-							"CompletionTokensDetails.RejectedPredictionTokens": 0,
-						},
 					},
 				},
 			},
@@ -1317,12 +1417,6 @@ func TestChatDataContentMessage_Image_NonStreaming(t *testing.T) {
 						InputTokenCount:  8513,
 						OutputTokenCount: 56,
 						TotalTokenCount:  8569,
-						AdditionalCounts: map[string]int64{
-							"PromptTokensDetails.AudioTokens":                  0,
-							"CompletionTokensDetails.AudioTokens":              0,
-							"CompletionTokensDetails.AcceptedPredictionTokens": 0,
-							"CompletionTokensDetails.RejectedPredictionTokens": 0,
-						},
 					},
 				},
 			},
@@ -1360,6 +1454,94 @@ func TestChatDataContentMessage_Image_NonStreaming(t *testing.T) {
 	}
 	if err := messagetest.MessagesEqual(resp.Messages, want); err != nil {
 		t.Error(err)
+	}
+}
+
+func TestChatDataContentMessage_AudioAndFile_NonStreaming(t *testing.T) {
+	// Minimal base64-encoded payloads standing in for a WAV clip and a PDF file.
+	const audioData = "UklGRiQAAABXQVZFZm10IBAAAAABAAEAAAA="
+	const pdfData = "JVBERi0xLjQKJcTl8uXrp/Og0MTGCg=="
+
+	const input = `
+            {
+              "messages": [
+                {
+                  "role": "user",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "Transcribe the audio and summarize the document."
+                    },
+                    {
+                      "type": "input_audio",
+                      "input_audio": {
+                        "data": "` + audioData + `",
+                        "format": "wav"
+                      }
+                    },
+                    {
+                      "type": "file",
+                      "file": {
+                        "file_data": "` + pdfData + `",
+                        "filename": "report.pdf"
+                      }
+                    }
+                  ]
+                }
+              ],
+              "model": "gpt-4o-mini"
+            }
+            `
+	const output = `
+            {
+              "id": "chatcmpl-audiofile",
+              "object": "chat.completion",
+              "created": 1727888631,
+              "model": "gpt-4o-mini-2024-07-18",
+              "choices": [
+                {
+                  "index": 0,
+                  "message": {
+                    "role": "assistant",
+                    "content": "Done.",
+                    "refusal": null
+                  },
+                  "logprobs": null,
+                  "finish_reason": "stop"
+                }
+              ]
+            }
+            `
+
+	server := newTestServer(t, input, output)
+	defer server.Close()
+
+	a := newTestClient(server)
+
+	messages := []*message.Message{
+		{
+			Role: message.RoleUser,
+			Contents: []message.Content{
+				&message.TextContent{Text: "Transcribe the audio and summarize the document."},
+				&message.DataContent{
+					Data:      audioData,
+					MediaType: "audio/wav",
+				},
+				&message.DataContent{
+					Name:      "report.pdf",
+					Data:      pdfData,
+					MediaType: "application/pdf",
+				},
+			},
+		},
+	}
+
+	resp, err := a.Run(t.Context(), messages).Collect()
+	if err != nil {
+		t.Fatalf("error = %v", err)
+	}
+	if got := resp.String(); got != "Done." {
+		t.Errorf("expected text %q, got %q", "Done.", got)
 	}
 }
 
@@ -1593,5 +1775,60 @@ func TestChatEmptyChoices_NonStreaming(t *testing.T) {
 	}
 	if usage := resp.Usage(); usage.InputTokenCount != 12 || usage.TotalTokenCount != 12 {
 		t.Errorf("expected usage input=12 total=12 to be surfaced, got %+v", usage)
+	}
+}
+
+func TestChatResponseWithRefusalContent_ParsesCorrectly(t *testing.T) {
+	const input = `
+		{
+			"messages":[{"role":"user","content":"harmful request"}],
+			"model":"gpt-4o-mini"
+		}
+		`
+	const output = `
+		{
+			"id":"chatcmpl-refusal",
+			"object":"chat.completion",
+			"created":1727888631,
+			"model":"gpt-4o-mini",
+			"choices":[{
+				"index":0,
+				"message":{"role":"assistant","content":null,"refusal":"I cannot provide that information"},
+				"finish_reason":"stop"
+			}]
+		}
+		`
+	server := newTestServer(t, input, output)
+	defer server.Close()
+
+	a := newTestClient(server)
+
+	resp, err := a.RunText(t.Context(), "harmful request").Collect()
+	if err != nil {
+		t.Fatalf("error = %v", err)
+	}
+
+	if len(resp.Messages) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(resp.Messages))
+	}
+
+	// Refusal is mapped to ErrorContent.
+	var errorContent *message.ErrorContent
+	for _, content := range resp.Messages[0].Contents {
+		if ec, ok := content.(*message.ErrorContent); ok {
+			errorContent = ec
+			break
+		}
+	}
+
+	if errorContent == nil {
+		t.Fatal("expected ErrorContent in message")
+	}
+
+	if errorContent.Message != "I cannot provide that information" {
+		t.Errorf("expected error message 'I cannot provide that information', got %q", errorContent.Message)
+	}
+	if errorContent.ErrorCode != "Refusal" {
+		t.Errorf("expected error code 'Refusal', got %q", errorContent.ErrorCode)
 	}
 }
