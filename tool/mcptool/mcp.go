@@ -1,6 +1,6 @@
 // Copyright (c) Microsoft. All rights reserved.
 
-// Package mcp provides integration with the Model Context Protocol (MCP).
+// Package mcptool provides integration with the Model Context Protocol (MCP).
 // It allows agents to connect to external MCP servers via stdio (subprocess)
 // or HTTP (SSE / streamable HTTP) and expose their tools as
 // tool.Tool / tool.FuncTool instances.
@@ -19,6 +19,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+// AddTool registers a tool.FuncTool on the given mcp.Server so it is exposed to MCP clients.
 func AddTool(src *mcp.Server, tl tool.FuncTool) {
 	src.AddTool(&mcp.Tool{
 		Name:         tl.Name(),
@@ -36,6 +37,7 @@ func AddTool(src *mcp.Server, tl tool.FuncTool) {
 	})
 }
 
+// Connect dials an MCP server over the given transport and returns a client session.
 func Connect(ctx context.Context, transport mcp.Transport) (*mcp.ClientSession, error) {
 	client := mcp.NewClient(&mcp.Implementation{
 		Name:    "agent-framework-go-mcp-client",
@@ -44,6 +46,7 @@ func Connect(ctx context.Context, transport mcp.Transport) (*mcp.ClientSession, 
 	return client.Connect(ctx, transport, nil)
 }
 
+// ListTools enumerates the remote server's tools and wraps each as a tool.Tool.
 func ListTools(ctx context.Context, session *mcp.ClientSession) ([]tool.Tool, error) {
 	toolsResult, err := session.ListTools(ctx, nil)
 	if err != nil {
@@ -58,6 +61,7 @@ func ListTools(ctx context.Context, session *mcp.ClientSession) ([]tool.Tool, er
 	// names) and cause the autocall tools map to silently drop all but the
 	// first tool. Detect it here and fail loudly so the caller gets a clear
 	// signal instead of missing/unreachable tools.
+	// Create tool.Tool instances for each MCP tool
 	result := make([]tool.Tool, 0, len(toolsResult.Tools))
 	seen := make(map[string]string, len(toolsResult.Tools))
 	for _, mcpTool := range toolsResult.Tools {
@@ -418,7 +422,7 @@ var (
 	_ tool.FuncTool = (*mcpWrapper)(nil)
 )
 
-// mcpWrapper wraps an MCP tool as an agent.Tool.
+// mcpWrapper wraps an MCP tool as a tool.Tool.
 type mcpWrapper struct {
 	session *mcp.ClientSession
 	tool    *mcp.Tool
