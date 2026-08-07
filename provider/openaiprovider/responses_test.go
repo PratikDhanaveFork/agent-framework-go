@@ -1432,6 +1432,48 @@ data: {"type":"response.completed","sequence_number":10,"response":{"id":"resp_e
 	if !strings.Contains(capturedBody, `"encrypted_content":"`+encrypted+`"`) {
 		t.Fatalf("expected replay request to carry encrypted_content %q, body = %s", encrypted, capturedBody)
 	}
+	// summary is required by the Responses API even when empty.
+	if !strings.Contains(capturedBody, `"summary":[]`) {
+		t.Fatalf("expected replay request to include an (empty) reasoning summary, body = %s", capturedBody)
+	}
+	// Plaintext reasoning content must not be replayed on input.
+	if strings.Contains(capturedBody, `"reasoning_text"`) {
+		t.Fatalf("expected replay request to omit plaintext reasoning content, body = %s", capturedBody)
+	}
+}
+
+// TestResponsesReasoningReplay_StoreTrue_SkipsReasoningItem verifies that when a
+// reasoning item has no encrypted content (store=true), it is not replayed in the
+// request. Under store=true the server retains the reasoning item by id, so
+// re-sending it would fail with a duplicate-item error.
+func TestResponsesReasoningReplay_StoreTrue_SkipsReasoningItem(t *testing.T) {
+	var capturedBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("failed reading request body: %v", err)
+		}
+		capturedBody = string(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"resp_store1","object":"response","created_at":1756752901,"status":"completed","model":"o4-mini-2025-04-16","output":[{"type":"message","id":"msg_store1","status":"completed","role":"assistant","content":[{"type":"output_text","text":"ok","annotations":[]}]}]}`)
+	}))
+	defer server.Close()
+
+	a := newTestResponsesClient(server, "o4-mini")
+	messages := []*message.Message{
+		{Role: message.RoleUser, Contents: []message.Content{&message.TextContent{Text: "Solve this problem step by step."}}},
+		{Role: message.RoleAssistant, Contents: []message.Content{
+			// No ProtectedData: reasoning was stored server-side (store=true).
+			&message.TextReasoningContent{Text: "Analyzing."},
+			&message.TextContent{Text: "The solution is 42."},
+		}},
+	}
+	if _, err := a.Run(t.Context(), messages).Collect(); err != nil {
+		t.Fatalf("replay error = %v", err)
+	}
+	if strings.Contains(capturedBody, `"type":"reasoning"`) {
+		t.Fatalf("expected reasoning item to be skipped under store=true, body = %s", capturedBody)
+	}
 }
 
 func TestResponsesChatOptions_Model_OverridesClientModel_Streaming(t *testing.T) {
@@ -2634,6 +2676,28 @@ data: {"type":"response.failed","response":{"id":"resp_001","object":"response",
 
 	if len(updates) < 2 {
 		t.Errorf("expected at least 2 updates, got %d", len(updates))
+	}
+
+	var errorContent *message.ErrorContent
+	for _, update := range updates {
+		for _, content := range update.Contents {
+			if ec, ok := content.(*message.ErrorContent); ok {
+				errorContent = ec
+				break
+			}
+		}
+		if errorContent != nil {
+			break
+		}
+	}
+	if errorContent == nil {
+		t.Fatal("expected response.failed update to surface ErrorContent")
+	}
+	if errorContent.Message != "Internal error" {
+		t.Errorf("expected error message %q, got %q", "Internal error", errorContent.Message)
+	}
+	if errorContent.ErrorCode != "internal_error" {
+		t.Errorf("expected error code %q, got %q", "internal_error", errorContent.ErrorCode)
 	}
 
 	// Verify all updates have the same response ID
@@ -3868,6 +3932,57 @@ func TestResponsesResponseWithError_IncludesInAdditionalPropertiesAndMessage(t *
 	}
 }
 
+func TestResponsesResponseWithFailedStatusWithoutErrorDetails_UsesDefaultErrorContent(t *testing.T) {
+	const input = `
+            {
+                "model":"gpt-4o-mini",
+                "input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"test"}]}]
+            }
+            `
+
+	const output = `
+            {
+              "id":"resp_004",
+              "object":"response",
+              "created_at":1741892091,
+              "status":"failed",
+              "model":"gpt-4o-mini",
+              "output":[]
+            }
+            `
+
+	server := newTestResponsesServer(t, input, output)
+	defer server.Close()
+
+	a := newTestResponsesClient(server, "gpt-4o-mini")
+
+	resp, err := a.RunText(t.Context(), "test").Collect()
+	if err != nil {
+		t.Fatalf("error = %v", err)
+	}
+	if len(resp.Messages) == 0 {
+		t.Fatal("expected at least one message")
+	}
+
+	lastMessage := resp.Messages[len(resp.Messages)-1]
+	var errorContent *message.ErrorContent
+	for _, content := range lastMessage.Contents {
+		if ec, ok := content.(*message.ErrorContent); ok {
+			errorContent = ec
+			break
+		}
+	}
+	if errorContent == nil {
+		t.Fatal("expected ErrorContent in last message")
+	}
+	if errorContent.Message != "The agent run failed." {
+		t.Errorf("expected default error message, got %q", errorContent.Message)
+	}
+	if errorContent.ErrorCode != "failed" {
+		t.Errorf("expected default error code, got %q", errorContent.ErrorCode)
+	}
+}
+
 func TestResponsesStreamingErrorUpdate_ActualErroneousFormat_ParsesCorrectly(t *testing.T) {
 	const input = `
             {
@@ -3953,11 +4068,11 @@ data: {"type":"response.failed","sequence_number":2,"response":{"id":"resp_003",
 		updates = append(updates, update)
 	}
 
-	// Find error update with empty error information
+	// Find synthesized failure content from the response.failed event.
 	var errorUpdate *agent.ResponseUpdate
 	for _, update := range updates {
 		for _, content := range update.Contents {
-			if _, ok := content.(*message.ErrorContent); ok {
+			if ec, ok := content.(*message.ErrorContent); ok && ec.Message == "The agent run failed." {
 				errorUpdate = update
 				break
 			}
@@ -3971,7 +4086,6 @@ data: {"type":"response.failed","sequence_number":2,"response":{"id":"resp_003",
 		t.Fatal("expected to find an update with ErrorContent")
 	}
 
-	// Verify error content has empty fields
 	var errorContent *message.ErrorContent
 	for _, content := range errorUpdate.Contents {
 		if ec, ok := content.(*message.ErrorContent); ok {
@@ -3983,13 +4097,11 @@ data: {"type":"response.failed","sequence_number":2,"response":{"id":"resp_003",
 	if errorContent == nil {
 		t.Fatal("expected ErrorContent in error update")
 	}
-
-	// Verify all fields are empty (like C#)
-	if errorContent.Message != "" {
-		t.Errorf("expected empty Message, got %q", errorContent.Message)
+	if errorContent.Message != "The agent run failed." {
+		t.Errorf("expected default Message, got %q", errorContent.Message)
 	}
-	if errorContent.ErrorCode != "" {
-		t.Errorf("expected empty ErrorCode, got %q", errorContent.ErrorCode)
+	if errorContent.ErrorCode != "failed" {
+		t.Errorf("expected default ErrorCode, got %q", errorContent.ErrorCode)
 	}
 	if errorContent.Details != "" {
 		t.Errorf("expected empty Details, got %q", errorContent.Details)
