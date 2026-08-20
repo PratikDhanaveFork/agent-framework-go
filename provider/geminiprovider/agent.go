@@ -25,7 +25,7 @@ import (
 
 type generateContentConfigOpt genai.GenerateContentConfig
 
-func (o generateContentConfigOpt) Value() any { return genai.GenerateContentConfig(o) }
+func (o generateContentConfigOpt) MAFValue() any { return genai.GenerateContentConfig(o) }
 
 // GenerateContentConfig allows passing custom parameters to the underlying genai API calls.
 func GenerateContentConfig(config genai.GenerateContentConfig) agent.Option {
@@ -101,8 +101,10 @@ func (a *client) run(ctx context.Context, messages []*message.Message, options .
 			}
 		}
 		var responseContents []message.Content
+		var finishReason string
 		if len(resp.Candidates) > 0 {
 			cand := resp.Candidates[0]
+			finishReason = toFinishReason(cand.FinishReason)
 			if cand.Content != nil {
 				for _, part := range cand.Content.Parts {
 					responseContents, err = buildResponsePart(part, responseContents)
@@ -126,6 +128,7 @@ func (a *client) run(ctx context.Context, messages []*message.Message, options .
 			yield(&agent.ResponseUpdate{
 				Contents:          responseContents,
 				Role:              message.RoleAssistant,
+				FinishReason:      finishReason,
 				CreatedAt:         time.Now(),
 				RawRepresentation: resp,
 			}, nil)
@@ -141,8 +144,10 @@ func (a *client) run(ctx context.Context, messages []*message.Message, options .
 				return
 			}
 			var streamContents []message.Content
+			var finishReason string
 			if len(resp.Candidates) > 0 {
 				cand := resp.Candidates[0]
+				finishReason = toFinishReason(cand.FinishReason)
 				if cand.Content != nil {
 					for _, part := range cand.Content.Parts {
 						streamContents, err = buildResponsePart(part, streamContents)
@@ -167,6 +172,7 @@ func (a *client) run(ctx context.Context, messages []*message.Message, options .
 			if !yield(&agent.ResponseUpdate{
 				Contents:          streamContents,
 				Role:              message.RoleAssistant,
+				FinishReason:      finishReason,
 				CreatedAt:         time.Now(),
 				RawRepresentation: resp,
 			}, nil) {
@@ -213,10 +219,10 @@ func (a *client) buildParams(messages []*message.Message, opts []agent.Option) (
 		// Clone mutable slice fields so that appending to cfg.Tools or
 		// cfg.SystemInstruction.Parts below never aliases the caller's
 		// backing arrays (the option stores a shallow copy of the struct).
-		cfg.Tools = append([]*genai.Tool(nil), cfg.Tools...)
+		cfg.Tools = slices.Clone(cfg.Tools)
 		if cfg.SystemInstruction != nil {
 			si := *cfg.SystemInstruction
-			si.Parts = append([]*genai.Part(nil), si.Parts...)
+			si.Parts = slices.Clone(si.Parts)
 			cfg.SystemInstruction = &si
 		}
 	}
@@ -295,9 +301,19 @@ func (a *client) buildParams(messages []*message.Message, opts []agent.Option) (
 			fc.Mode = genai.FunctionCallingConfigModeAny
 			fc.AllowedFunctionNames = mode.Required()
 		}
-		cfg.ToolConfig = &genai.ToolConfig{
-			FunctionCallingConfig: fc,
+		// Merge into any caller-supplied ToolConfig (e.g. a RetrievalConfig for
+		// Vertex grounding passed through GenerateContentConfig) rather than
+		// replacing it, so only the function-calling mode is overridden. Shallow-
+		// clone the struct first so overriding FunctionCallingConfig preserves the
+		// caller's other fields without mutating their ToolConfig pointer (which is
+		// aliased via the shallow *cfg = p copy above).
+		if cfg.ToolConfig == nil {
+			cfg.ToolConfig = &genai.ToolConfig{}
+		} else {
+			tc := *cfg.ToolConfig
+			cfg.ToolConfig = &tc
 		}
+		cfg.ToolConfig.FunctionCallingConfig = fc
 	}
 
 	// Build a map of CallID → function name by scanning all messages first.
@@ -470,17 +486,22 @@ func buildResponsePart(part *genai.Part, contents []message.Content) ([]message.
 	if part.Thought {
 		// Thinking model: emit TextReasoningContent. Encode ThoughtSignature as
 		// base64 in ProtectedData so it can be passed back in multi-turn requests.
-		protectedData := ""
-		if len(part.ThoughtSignature) > 0 {
-			protectedData = base64.StdEncoding.EncodeToString(part.ThoughtSignature)
+		// Skip a thought part that carries neither thinking text nor a signature,
+		// consistent with how empty text parts are skipped below; such a part
+		// would otherwise add an empty, information-free reasoning content.
+		if part.Text != "" || len(part.ThoughtSignature) > 0 {
+			protectedData := ""
+			if len(part.ThoughtSignature) > 0 {
+				protectedData = base64.StdEncoding.EncodeToString(part.ThoughtSignature)
+			}
+			contents = append(contents, &message.TextReasoningContent{
+				Text:          part.Text,
+				ProtectedData: protectedData,
+				ContentHeader: message.ContentHeader{
+					RawRepresentation: part,
+				},
+			})
 		}
-		contents = append(contents, &message.TextReasoningContent{
-			Text:          part.Text,
-			ProtectedData: protectedData,
-			ContentHeader: message.ContentHeader{
-				RawRepresentation: part,
-			},
-		})
 	} else if part.Text != "" {
 		contents = append(contents, &message.TextContent{
 			Text: part.Text,
@@ -611,6 +632,29 @@ func toFunctionResponseMap(c *message.FunctionResultContent) (map[string]any, er
 			return map[string]any{"output": string(data)}, nil
 		}
 		return m, nil
+	}
+}
+
+// toFinishReason maps a genai finish reason to the framework's canonical
+// finish reason strings, mirroring the values produced by the OpenAI and
+// Copilot providers ("stop", "length", "tool_calls", "content_filter") so that
+// aggregation over ResponseUpdate.FinishReason stays consistent across
+// providers and with the .NET/Python SDKs. It returns "" for reasons that have
+// no framework equivalent.
+func toFinishReason(reason genai.FinishReason) string {
+	switch reason {
+	case genai.FinishReasonStop:
+		return "stop"
+	case genai.FinishReasonMaxTokens:
+		return "length"
+	case genai.FinishReasonSafety, genai.FinishReasonRecitation,
+		genai.FinishReasonBlocklist, genai.FinishReasonProhibitedContent,
+		genai.FinishReasonSPII:
+		return "content_filter"
+	case genai.FinishReasonMalformedFunctionCall:
+		return "tool_calls"
+	default:
+		return ""
 	}
 }
 
