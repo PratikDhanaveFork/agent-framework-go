@@ -44,13 +44,8 @@ func (strategy *ToolResultStrategy) Compact(_ context.Context, index *MessageInd
 		return false, nil
 	}
 
-	minimumPreservedGroups := cmp.Or(max(strategy.MinimumPreservedGroups, 0), defaultMinimumPreservedToolResultGroups)
-	var nonSystemIncludedIndices []int
-	for i, group := range index.Groups {
-		if !group.IsExcluded && group.Kind != GroupKindSystem {
-			nonSystemIncludedIndices = append(nonSystemIncludedIndices, i)
-		}
-	}
+	minimumPreservedGroups := cmp.Or(ensureNonNegative(strategy.MinimumPreservedGroups), defaultMinimumPreservedToolResultGroups)
+	nonSystemIncludedIndices := index.includedNonSystemGroupIndices()
 	protectedStart := len(nonSystemIncludedIndices) - minimumPreservedGroups
 	if protectedStart < 0 {
 		protectedStart = 0
@@ -132,9 +127,11 @@ func DefaultToolCallFormatter(group *MessageGroup) string {
 
 	plainTextIndex := 0
 	var orderedNames []string
+	seenNames := make(map[string]bool)
 	groupedResults := make(map[string][]string)
 	for _, functionCall := range functionCalls {
-		if _, ok := groupedResults[functionCall.name]; !ok {
+		if !seenNames[functionCall.name] {
+			seenNames[functionCall.name] = true
 			orderedNames = append(orderedNames, functionCall.name)
 		}
 		result, ok := resultsByCallID[functionCall.id]
