@@ -5,6 +5,7 @@ package inproc_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"iter"
 	"reflect"
 	"slices"
@@ -156,6 +157,129 @@ func TestStartedEvent_EmittedInLockstepWithoutWork(t *testing.T) {
 	}
 }
 
+// askOnceBinding returns an executor that posts a single ExternalRequest on
+// string input and yields the response payload as output once it arrives. It
+// drives an input → request-halt → response → output → idle run: exactly two
+// input → processing → halt cycles.
+func askOnceBinding(id string) workflow.ExecutorBinding {
+	port := workflow.RequestPort{
+		ID:       "ask",
+		Request:  reflect.TypeFor[string](),
+		Response: reflect.TypeFor[string](),
+	}
+	binding := workflow.ExecutorBinding{ID: id, ImplementationID: "*workflow.Executor"}
+	binding.NewExecutorFunc = func(_ string) (*workflow.Executor, error) {
+		return &workflow.Executor{
+			ID: id,
+
+			DisableAutoSendMessageHandlerResultObject: true,
+			DisableAutoYieldOutputHandlerResultObject: true,
+			ConfigureProtocol: func(rb *workflow.ProtocolBuilder) (*workflow.ProtocolBuilder, error) {
+				rb.YieldsOutputType(reflect.TypeFor[string]())
+				rb.RouteBuilder.
+					AddHandlerRaw(reflect.TypeFor[string](), nil, func(wctx *workflow.Context, _ any) (any, error) {
+						req, err := workflow.NewExternalRequest("req-1", port, "what is your name?")
+						if err != nil {
+							return nil, err
+						}
+						return nil, wctx.PostRequest(req)
+					}).
+					AddHandlerRaw(reflect.TypeFor[*workflow.ExternalResponse](), nil, func(wctx *workflow.Context, msg any) (any, error) {
+						resp := msg.(*workflow.ExternalResponse)
+						data, ok := resp.Data.As(port.Response)
+						if !ok {
+							return nil, fmt.Errorf("response data is not %v", port.Response)
+						}
+						return nil, wctx.YieldOutput(data)
+					})
+				return rb, nil
+			},
+		}, nil
+	}
+	return binding
+}
+
+// respondWhenPending waits until the streaming run has halted with pending
+// requests, then sends the response exactly once. In Lockstep mode the run is
+// driven synchronously by the WatchStream consumer, so the continuation must be
+// injected from a separate goroutine after the halt is observed; sending before
+// the halt would let the same cycle absorb the response.
+func respondWhenPending(ctx context.Context, stream *inproc.StreamingRun, resp *workflow.ExternalResponse) {
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		if status, err := stream.GetStatus(ctx); err == nil && status == inproc.RunStatusPendingRequests {
+			_ = stream.SendResponse(ctx, resp)
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// TestStartedEvent_EmittedPerContinuationCycle verifies that a StartedEvent is
+// raised for every input → processing → halt cycle, including the continuation
+// cycle that runs after an external response is supplied. The streaming
+// (OffThread) run loop already emits one StartedEvent per cycle; Lockstep's
+// blocking WatchStream drives multiple cycles from a single TakeEventStream
+// call and must match that per-cycle semantics.
+func TestStartedEvent_EmittedPerContinuationCycle(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		env  *inproc.ExecutionEnvironment
+	}{
+		{"lockstep", inproc.Lockstep},
+		{"offthread", inproc.OffThread},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			asker := askOnceBinding("asker")
+			wf, err := workflow.NewBuilder(asker).WithOutputFrom(asker).Build()
+			if err != nil {
+				t.Fatalf("Build: %v", err)
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			stream, err := tc.env.RunStreaming(ctx, wf, "kick")
+			if err != nil {
+				t.Fatalf("RunStreaming: %v", err)
+			}
+			defer func() { _ = stream.CancelRun() }()
+
+			var startedCount int
+			var responded bool
+			var gotOutput any
+			for evt, err := range stream.WatchStream(ctx) {
+				if err != nil {
+					t.Fatalf("watch: %v", err)
+				}
+				switch e := evt.(type) {
+				case workflow.StartedEvent:
+					startedCount++
+				case workflow.RequestInfoEvent:
+					if !responded {
+						responded = true
+						resp, err := e.Request.CreateResponse("Alice")
+						if err != nil {
+							t.Fatalf("CreateResponse: %v", err)
+						}
+						go respondWhenPending(ctx, stream, resp)
+					}
+				case workflow.OutputEvent:
+					gotOutput = e.Output
+				}
+			}
+
+			if got, want := gotOutput, any("Alice"); got != want {
+				t.Errorf("output = %v, want %v", got, want)
+			}
+			if startedCount != 2 {
+				t.Errorf("StartedEvent count = %d, want 2 (one per continuation cycle)", startedCount)
+			}
+		})
+	}
+}
+
 func TestStreamingRun_WaitToTakeStreamDoesNotBlockOffThread(t *testing.T) {
 	ex := minimalEchoBinding("ex")
 	wf, err := workflow.NewBuilder(ex).WithOutputFrom(ex).Build()
@@ -220,6 +344,48 @@ func TestRun_ResumeAcceptsMessages(t *testing.T) {
 	}
 }
 
+// TestRun_NewEventsEarlyBreakPreservesUnreadEvents verifies that stopping the
+// NewEvents iterator early does not discard the events that were never yielded.
+// The read cursor must advance only past events actually delivered to the
+// consumer, so a subsequent NewEvents call still surfaces the rest of the batch.
+func TestRun_NewEventsEarlyBreakPreservesUnreadEvents(t *testing.T) {
+	ex := minimalEchoBinding("ex")
+	wf, err := workflow.NewBuilder(ex).WithOutputFrom(ex).Build()
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	ctx := context.Background()
+	run, err := inproc.Default.Run(ctx, wf, "hi")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	total := run.NewEventCount()
+	if total < 2 {
+		t.Fatalf("need at least 2 new events to exercise an early break, got %d", total)
+	}
+
+	// Consume exactly one event, then stop iterating.
+	consumed := 0
+	for range run.NewEvents() {
+		consumed++
+		break
+	}
+	if consumed != 1 {
+		t.Fatalf("consumed = %d, want 1", consumed)
+	}
+
+	// The events after the one consumed must still be reported as new and be
+	// re-iterable; they must not be silently dropped by the early break.
+	if got, want := run.NewEventCount(), total-1; got != want {
+		t.Errorf("NewEventCount after early break = %d, want %d", got, want)
+	}
+	if got, want := len(slices.Collect(run.NewEvents())), total-1; got != want {
+		t.Errorf("re-iterated new events after early break = %d, want %d", got, want)
+	}
+}
+
 func TestRunAndStreamingRun_ProduceEquivalentOutputs(t *testing.T) {
 	ex := minimalEchoBinding("ex")
 	wf, err := workflow.NewBuilder(ex).WithOutputFrom(ex).Build()
@@ -281,6 +447,44 @@ func TestStreamingRun_AcceptsSequentialMessages(t *testing.T) {
 	}
 }
 
+// Concurrent callers may enqueue input on the same StreamingRun. Run with -race.
+func TestStreamingRun_ConcurrentSendMessage_NoDataRace(t *testing.T) {
+	ex := minimalEchoBinding("ex")
+	wf, err := workflow.NewBuilder(ex).WithOutputFrom(ex).Build()
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	ctx := context.Background()
+	stream, err := inproc.Default.RunStreaming(ctx, wf, nil)
+	if err != nil {
+		t.Fatalf("RunStreaming: %v", err)
+	}
+	defer func() { _ = stream.Close(ctx) }()
+
+	const senders = 64
+	start := make(chan struct{})
+	errs := make(chan error, senders)
+	var wg sync.WaitGroup
+	wg.Add(senders)
+	for i := 0; i < senders; i++ {
+		go func() {
+			defer wg.Done()
+			<-start
+			errs <- stream.SendMessage(ctx, "message")
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		if err != nil {
+			t.Errorf("SendMessage: %v", err)
+		}
+	}
+}
+
 func TestStreamingRun_SendMessageReturnsErrInvalidInputType(t *testing.T) {
 	ex := minimalEchoBinding("ex")
 	wf, err := workflow.NewBuilder(ex).WithOutputFrom(ex).Build()
@@ -298,6 +502,38 @@ func TestStreamingRun_SendMessageReturnsErrInvalidInputType(t *testing.T) {
 	err = stream.SendMessage(ctx, 42)
 	if !errors.Is(err, workflow.ErrInvalidInputType) {
 		t.Fatalf("SendMessage error = %v, want ErrInvalidInputType", err)
+	}
+}
+
+// Cancellation must not acknowledge work after the event loop has stopped.
+// This test intentionally documents the current gap and remains red until
+// canceled runs reject new work.
+func TestStreamingRun_SendMessageAfterCancelReturnsError(t *testing.T) {
+	ex := minimalEchoBinding("ex")
+	wf, err := workflow.NewBuilder(ex).WithOutputFrom(ex).Build()
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	ctx := context.Background()
+	stream, err := inproc.Default.RunStreaming(ctx, wf, nil)
+	if err != nil {
+		t.Fatalf("RunStreaming: %v", err)
+	}
+	defer func() { _ = stream.Close(ctx) }()
+
+	if err := stream.CancelRun(); err != nil {
+		t.Fatalf("CancelRun: %v", err)
+	}
+	status, err := stream.GetStatus(ctx)
+	if err != nil {
+		t.Fatalf("GetStatus: %v", err)
+	}
+	if status != inproc.RunStatusEnded {
+		t.Fatalf("status after CancelRun = %v, want Ended", status)
+	}
+	if err := stream.SendMessage(ctx, "message"); err == nil {
+		t.Fatal("SendMessage after CancelRun succeeded even though the run can no longer execute it")
 	}
 }
 
