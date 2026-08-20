@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"iter"
+	"sync"
 	"sync/atomic"
 
 	"github.com/microsoft/agent-framework-go/internal/concurrent"
@@ -43,8 +44,9 @@ func contextWithWorkflowTelemetry(ctx context.Context, wf *workflow.Workflow) co
 }
 
 type inputWaiter struct {
+	mu     sync.Mutex
 	signal chan struct{}
-	closed atomic.Bool
+	closed bool
 }
 
 func newInputWaiter() inputWaiter {
@@ -56,7 +58,11 @@ func newInputWaiter() inputWaiter {
 
 // signalInput: non-blocking signal (swallow if already signaled)
 func (iw *inputWaiter) signalInput() {
-	if iw.closed.Load() {
+	// Hold the lock while sending so it cannot race with close closing the
+	// channel, which would otherwise panic with "send on closed channel".
+	iw.mu.Lock()
+	defer iw.mu.Unlock()
+	if iw.closed {
 		return
 	}
 	select {
@@ -79,7 +85,10 @@ func (iw *inputWaiter) waitForInput(ctx context.Context) error {
 
 // close closes the inputWaiter and releases any waiting goroutines
 func (iw *inputWaiter) close() {
-	if iw.closed.CompareAndSwap(false, true) {
+	iw.mu.Lock()
+	defer iw.mu.Unlock()
+	if !iw.closed {
+		iw.closed = true
 		close(iw.signal)
 	}
 }
@@ -176,8 +185,7 @@ func (s *streamingRunEventStream) runLoop() {
 		default:
 		}
 
-		cycleCtx, runActivity := telemetry.StartWorkflowRun(ctx, workflowMetadata(wf, s.stepRunner.SessionID()))
-		runActivity.AddEvent(observability.EventWorkflowStarted)
+		cycleCtx := ctx
 
 		// Run all available supersteps continuously
 		// Events are streamed out in real-time as they happen via the event handler
@@ -188,6 +196,13 @@ func (s *streamingRunEventStream) runLoop() {
 			// Running after a prior halt has already been observed by callers
 			// (e.g. Run.RunToNextHalt returning after reading an Idle halt signal).
 			s.setStatus(RunStatusRunning)
+
+			// Open the WorkflowRun span only when there's actual work to
+			// process, to avoid spurious zero-superstep spans on no-work loop
+			// iterations. This mirrors the lockstep implementation.
+			var runActivity *observability.Activity
+			cycleCtx, runActivity = telemetry.StartWorkflowRun(ctx, workflowMetadata(wf, s.stepRunner.SessionID()))
+			runActivity.AddEvent(observability.EventWorkflowStarted)
 
 			// Emit StartedEvent only when there's actual work to process,
 			// to avoid spurious events on no-work loop iterations.
@@ -212,9 +227,10 @@ func (s *streamingRunEventStream) runLoop() {
 					return
 				}
 			}
+
+			runActivity.AddEvent(observability.EventWorkflowCompleted)
+			runActivity.End()
 		}
-		runActivity.AddEvent(observability.EventWorkflowCompleted)
-		runActivity.End()
 
 		// Update status based on what's waiting
 		if s.stepRunner.HasUnservicedRequests() {
@@ -545,10 +561,47 @@ func (l *lockstepRunEventStream) TakeEventStream(ctx context.Context, blockOnPen
 
 			// If blocking on pending requests and we have pending requests, wait for input
 			if blockOnPendingRequest && status == RunStatusPendingRequests {
-				if err := l.inputWaiter.waitForInput(linkedCtx); err != nil {
-					return
+				// Wait for the continuation signal. A wakeup does not guarantee
+				// that work is actually available: the input signal is a binary
+				// semaphore, so a stale signal (e.g. left over from the initial
+				// input) or a spurious wakeup can return here with nothing to
+				// process. Keep waiting until there is genuine work, re-checking
+				// for terminal state each time, so that the StartedEvent below is
+				// emitted for — and stays paired with — the cycle that actually
+				// runs the continuation supersteps.
+				for !l.stepRunner.HasUnprocessedMessages() {
+					if err := l.inputWaiter.waitForInput(linkedCtx); err != nil {
+						return
+					}
+					if l.stepRunner.HasUnprocessedMessages() {
+						break
+					}
+					// No work yet: the run may have progressed to a terminal
+					// state (e.g. requests serviced elsewhere). Re-evaluate and
+					// stop if there is nothing left to wait for.
+					if l.stepRunner.HasUnservicedRequests() {
+						l.setStatus(RunStatusPendingRequests)
+					} else {
+						l.setStatus(RunStatusIdle)
+					}
+					status = l.getStatus()
+					if l.shouldBreak(status, blockOnPendingRequest, linkedCtx) {
+						return
+					}
 				}
 				startRunActivity()
+				// Emit a StartedEvent for the continuation cycle, mirroring the
+				// streaming run loop which raises one per input → processing →
+				// halt cycle. There is confirmed work to process, so the event
+				// stays paired with the cycle that runs it. The event is drained
+				// and yielded before the cycle's supersteps.
+				l.eventQueue.Enqueue(workflow.StartedEvent{})
+				// Drain immediately so the StartedEvent is yielded before the
+				// cycle's supersteps run, rather than being held in the queue
+				// and drained alongside the first superstep's events.
+				if !l.drainAndFilterEvents(linkedCtx, yield) {
+					return
+				}
 			} else {
 				// No more work to do
 				return
