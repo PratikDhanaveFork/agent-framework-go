@@ -75,9 +75,8 @@ type FunctionInvocationContext struct {
 // runs first and wraps the rest, matching [runChain].
 type FunctionInvocationMiddleware func(ctx context.Context, fic *FunctionInvocationContext, next func(context.Context) (any, error)) (any, error)
 
-// runChain applies the given middlewares around the given RunFunc.
-func runChain(ctx context.Context, fn RunFunc, middlewares []Middleware, messages []*message.Message, options ...Option) iter.Seq2[*ResponseUpdate, error] {
-	// Chain the middlewares together.
+// compileRunChain applies the given middlewares around fn.
+func compileRunChain(fn RunFunc, middlewares []Middleware) RunFunc {
 	for i := len(middlewares) - 1; i >= 0; i-- {
 		mw := middlewares[i]
 		fn = middlewareRunner{
@@ -85,7 +84,7 @@ func runChain(ctx context.Context, fn RunFunc, middlewares []Middleware, message
 			next:       fn,
 		}.Run
 	}
-	return fn(ctx, messages, options...)
+	return fn
 }
 
 type middlewareRunner struct {
