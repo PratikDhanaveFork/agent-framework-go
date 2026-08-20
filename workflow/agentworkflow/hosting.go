@@ -175,6 +175,12 @@ type hostExecutor struct {
 	turnEmitEvents  *bool
 }
 
+type generatedHostedMessageState struct {
+	messageID  string
+	responseID string
+	role       message.Role
+}
+
 func newHostExecutor(a *agent.Agent, cfg Config) *hostExecutor {
 	id := descriptiveID(a)
 	ports := hostPorts(id)
@@ -419,10 +425,12 @@ func (h *hostExecutor) runAgentAndDispatch(wctx *workflow.Context, messages []*m
 	)
 
 	var resp agent.Response
+	var generatedMessageState generatedHostedMessageState
 	for update, err := range h.agent.Run(wctx, agentInput, runOpts...) {
 		if err != nil {
 			return err
 		}
+		update = stampHostedUpdateMessageID(update, &generatedMessageState)
 		if emitUpdates {
 			if err := wctx.YieldOutput(update); err != nil {
 				return err
@@ -465,6 +473,48 @@ func (h *hostExecutor) runAgentAndDispatch(wctx *workflow.Context, messages []*m
 		return err
 	}
 	return nil
+}
+
+func stampHostedUpdateMessageID(update *agent.ResponseUpdate, state *generatedHostedMessageState) *agent.ResponseUpdate {
+	if update == nil {
+		return nil
+	}
+	if update.MessageID != "" {
+		if state != nil {
+			*state = generatedHostedMessageState{}
+		}
+		return update
+	}
+	if !responseUpdateHasContent(update) || state == nil {
+		return update
+	}
+	if state.messageID == "" ||
+		(state.responseID != "" && update.ResponseID != "" && state.responseID != update.ResponseID) ||
+		(state.role != "" && update.Role != "" && state.role != update.Role) {
+		state.messageID = newMessageID()
+	}
+	if update.ResponseID != "" {
+		state.responseID = update.ResponseID
+	}
+	if update.Role != "" {
+		state.role = update.Role
+	}
+	clone := *update
+	clone.MessageID = state.messageID
+	return &clone
+}
+
+func responseUpdateHasContent(update *agent.ResponseUpdate) bool {
+	if update == nil {
+		return false
+	}
+	for _, content := range update.Contents {
+		if text, ok := content.(*message.TextContent); ok && text.Text == "" {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 // releasePendingTurnIfReady propagates the held TurnToken downstream once all
@@ -594,44 +644,36 @@ func (h *hostExecutor) dispatchRequests(wctx *workflow.Context, msgs []*message.
 		}
 	}
 
-	var approvalDispatches []*message.ToolApprovalRequestContent
-	var callDispatches []*message.FunctionCallContent
-	for _, id := range approvalOrder {
-		approval, ok := approvalRequests[id]
-		if !ok {
-			continue
-		}
-		delete(approvalRequests, id)
-		added, err := h.approvalHandler.TrackRequest(wctx, approval)
-		if err != nil {
-			return err
-		}
-		if added {
-			approvalDispatches = append(approvalDispatches, approval)
-		}
+	if err := dispatchTrackedRequests(wctx, approvalOrder, approvalRequests, h.approvalHandler); err != nil {
+		return err
 	}
-	for _, id := range callOrder {
-		call, ok := functionCalls[id]
+	return dispatchTrackedRequests(wctx, callOrder, functionCalls, h.callHandler)
+}
+
+type requestDispatcher[T any] interface {
+	TrackRequest(*workflow.Context, T) (bool, error)
+	DispatchRequest(*workflow.Context, T) error
+}
+
+func dispatchTrackedRequests[T any](wctx *workflow.Context, order []string, requests map[string]T, dispatcher requestDispatcher[T]) error {
+	dispatches := make([]T, 0, len(order))
+	for _, id := range order {
+		request, ok := requests[id]
 		if !ok {
 			continue
 		}
-		delete(functionCalls, id)
-		added, err := h.callHandler.TrackRequest(wctx, call)
+		delete(requests, id)
+		added, err := dispatcher.TrackRequest(wctx, request)
 		if err != nil {
 			return err
 		}
 		if added {
-			callDispatches = append(callDispatches, call)
+			dispatches = append(dispatches, request)
 		}
 	}
 
-	for _, approval := range approvalDispatches {
-		if err := h.approvalHandler.DispatchRequest(wctx, approval); err != nil {
-			return err
-		}
-	}
-	for _, call := range callDispatches {
-		if err := h.callHandler.DispatchRequest(wctx, call); err != nil {
+	for _, request := range dispatches {
+		if err := dispatcher.DispatchRequest(wctx, request); err != nil {
 			return err
 		}
 	}
