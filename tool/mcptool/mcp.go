@@ -1,6 +1,6 @@
 // Copyright (c) Microsoft. All rights reserved.
 
-// Package mcp provides integration with the Model Context Protocol (MCP).
+// Package mcptool provides integration with the Model Context Protocol (MCP).
 // It allows agents to connect to external MCP servers via stdio (subprocess)
 // or HTTP (SSE / streamable HTTP) and expose their tools as
 // tool.Tool / tool.FuncTool instances.
@@ -19,6 +19,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+// AddTool registers a tool.FuncTool on the given mcp.Server so it is exposed to MCP clients.
 func AddTool(src *mcp.Server, tl tool.FuncTool) {
 	src.AddTool(&mcp.Tool{
 		Name:         tl.Name(),
@@ -36,6 +37,7 @@ func AddTool(src *mcp.Server, tl tool.FuncTool) {
 	})
 }
 
+// Connect dials an MCP server over the given transport and returns a client session.
 func Connect(ctx context.Context, transport mcp.Transport) (*mcp.ClientSession, error) {
 	client := mcp.NewClient(&mcp.Implementation{
 		Name:    "agent-framework-go-mcp-client",
@@ -44,16 +46,30 @@ func Connect(ctx context.Context, transport mcp.Transport) (*mcp.ClientSession, 
 	return client.Connect(ctx, transport, nil)
 }
 
+// ListTools enumerates the remote server's tools and wraps each as a tool.Tool.
 func ListTools(ctx context.Context, session *mcp.ClientSession) ([]tool.Tool, error) {
 	toolsResult, err := session.ListTools(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list tools: %w", err)
 	}
 
-	// Create agent.Tool instances for each MCP tool
+	// Create agent.Tool instances for each MCP tool.
+	//
+	// Normalization (normalizeMCPName) can map distinct remote names onto the
+	// same provider-safe name (e.g. "a b" and "a/b" both become "a-b"). Such a
+	// collision would break provider tool registration (duplicate function
+	// names) and cause the autocall tools map to silently drop all but the
+	// first tool. Detect it here and fail loudly so the caller gets a clear
+	// signal instead of missing/unreachable tools.
+	// Create tool.Tool instances for each MCP tool
 	result := make([]tool.Tool, 0, len(toolsResult.Tools))
+	seen := make(map[string]string, len(toolsResult.Tools))
 	for _, mcpTool := range toolsResult.Tools {
 		agentTool := newMCPToolWrapper(session, mcpTool)
+		if existing, ok := seen[agentTool.name]; ok {
+			return nil, fmt.Errorf("normalized MCP tool name collision: remote tools %q and %q both normalize to %q", existing, mcpTool.Name, agentTool.name)
+		}
+		seen[agentTool.name] = mcpTool.Name
 		result = append(result, agentTool)
 	}
 
@@ -406,21 +422,46 @@ var (
 	_ tool.FuncTool = (*mcpWrapper)(nil)
 )
 
-// mcpWrapper wraps an MCP tool as an agent.Tool.
+// mcpWrapper wraps an MCP tool as a tool.Tool.
 type mcpWrapper struct {
 	session *mcp.ClientSession
 	tool    *mcp.Tool
+	// name is the normalized tool name surfaced to providers and used as the
+	// autocall map key. tool.Name retains the original remote name used when
+	// invoking the MCP server.
+	name string
 }
 
 func newMCPToolWrapper(session *mcp.ClientSession, tool *mcp.Tool) *mcpWrapper {
 	return &mcpWrapper{
 		session: session,
 		tool:    tool,
+		name:    normalizeMCPName(tool.Name),
 	}
 }
 
+// normalizeMCPName replaces every rune that is not a valid function-name
+// character with a dash. Providers such as OpenAI reject tool names that do not
+// match the [A-Za-z0-9_.-] identifier pattern, but MCP server tool names may
+// contain arbitrary characters (spaces, slashes, colons). This mirrors the
+// Python SDK's _normalize_mcp_name so the same remote tool surfaces under the
+// same name across SDKs.
+func normalizeMCPName(name string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'A' && r <= 'Z',
+			r >= 'a' && r <= 'z',
+			r >= '0' && r <= '9',
+			r == '_', r == '.', r == '-':
+			return r
+		default:
+			return '-'
+		}
+	}, name)
+}
+
 func (w *mcpWrapper) Name() string {
-	return w.tool.Name
+	return w.name
 }
 
 func (w *mcpWrapper) Description() string {
