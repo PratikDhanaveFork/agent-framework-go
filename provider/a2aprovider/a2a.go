@@ -27,7 +27,7 @@ type AgentConfig struct {
 
 type taskIDOpt struct{ string }
 
-func (o taskIDOpt) Value() any { return o.string }
+func (o taskIDOpt) MAFValue() any { return o.string }
 
 // TaskID returns an [agent.Option] that associates the run with an existing A2A
 // task, so the request continues that task rather than starting a new one.
@@ -88,33 +88,58 @@ func (a *a2aProvider) run(ctx context.Context, messages []*message.Message, opti
 			yieldTask(yield, task)
 			return
 		}
+		if len(messages) == 0 {
+			return
+		}
+		// Collect the parts of every input message into a single A2A message so the
+		// run issues exactly one request, matching the framework's one-run/one-request
+		// contract (and the .NET/Python A2A providers, which map a run's messages to a
+		// single A2A Message). Issuing one request per message would also cross-link the
+		// later messages to the task created by the first via ReferenceTasks/TaskID.
 		var parts a2a.ContentParts
+		var msgID string
+		var metadata map[string]any
 		for _, msg := range messages {
-			parts = parts[:0] // reset parts slice
-			parts, err := contentsToParts(msg.Contents, parts)
+			var err error
+			parts, err = contentsToParts(msg.Contents, parts)
 			if err != nil {
 				yield(nil, err)
 				return
 			}
-			params := &a2a.SendMessageRequest{Message: createA2AMessage(session, msg, parts)}
-			var seq iter.Seq2[a2a.Event, error]
-			if stream {
-				seq = a.client.SendStreamingMessage(ctx, params)
-			} else {
-				// Mirror .NET A2AAgent.RunCoreAsync, which sets the send
-				// configuration only on the non-streaming send. Only set Config
-				// when background responses are explicitly enabled so the wire
-				// request stays unchanged (Config nil) in the default case.
-				if allowBackground, _ := agent.GetOption(options, agent.AllowBackgroundResponses); allowBackground {
-					params.Config = &a2a.SendMessageConfig{ReturnImmediately: true}
-				}
-				resp, err := a.client.SendMessage(ctx, params)
-				seq = func(yield func(a2a.Event, error) bool) {
-					yield(resp, err)
-				}
+			if msg.ID != "" {
+				msgID = msg.ID
 			}
-			sendMsg(session, seq, yield)
+			// Treat a non-nil map as "present" even when empty so that an
+			// empty-but-non-nil AdditionalProperties is preserved as an empty
+			// metadata map (nil vs empty map are distinct in JSON output),
+			// matching the per-message maps.Clone behavior in createA2AMessage.
+			if msg.AdditionalProperties != nil {
+				if metadata == nil {
+					metadata = make(map[string]any, len(msg.AdditionalProperties))
+				}
+				maps.Copy(metadata, msg.AdditionalProperties)
+			}
 		}
+		// Build a single combined message from the collected parts, ID and metadata,
+		// then reuse createA2AMessage for the ContextID/task-linking logic so the run
+		// issues exactly one request.
+		combined := &message.Message{ID: msgID, AdditionalProperties: metadata}
+		userMsg := createA2AMessage(session, combined, parts)
+
+		params := &a2a.SendMessageRequest{Message: userMsg}
+		var seq iter.Seq2[a2a.Event, error]
+		if stream {
+			seq = a.client.SendStreamingMessage(ctx, params)
+		} else {
+			if allowBackground, _ := agent.GetOption(options, agent.AllowBackgroundResponses); allowBackground {
+				params.Config = &a2a.SendMessageConfig{ReturnImmediately: true}
+			}
+			resp, err := a.client.SendMessage(ctx, params)
+			seq = func(yield func(a2a.Event, error) bool) {
+				yield(resp, err)
+			}
+		}
+		sendMsg(session, seq, yield)
 	}
 }
 
@@ -296,6 +321,22 @@ func yieldTask(yield func(*agent.ResponseUpdate, error) bool, task *a2a.Task) bo
 		timestamp = *task.Status.Timestamp
 	}
 	var contents []message.Content
+	messageID := ""
+	if task.Status.Message != nil {
+		messageID = task.Status.Message.ID
+		// Mirror the streaming TaskStatusUpdateEvent path: surface the status
+		// message text for states where it carries the agent's response (an
+		// input-required follow-up question or a terminal summary), rather than
+		// dropping it when the task has no artifacts.
+		if task.Status.State == a2a.TaskStateInputRequired || task.Status.State.Terminal() {
+			var err error
+			contents, err = partsToContents(task.Status.Message.Parts, contents)
+			if err != nil {
+				yield(nil, err)
+				return false
+			}
+		}
+	}
 	artifactMetadata := make([]map[string]any, 0, len(task.Artifacts))
 	for _, artifact := range task.Artifacts {
 		var err error
@@ -311,7 +352,7 @@ func yieldTask(yield func(*agent.ResponseUpdate, error) bool, task *a2a.Task) bo
 	// task-level metadata, matching .NET's A2A conversion which preserves
 	// artifact metadata rather than dropping it.
 	metadata := mergeMetadata(task.Metadata, artifactMetadata...)
-	update := newResponseUpdate(task, metadata, string(task.ID), "", message.RoleAssistant, contents, timestamp)
+	update := newResponseUpdate(task, metadata, string(task.ID), messageID, message.RoleAssistant, contents, timestamp)
 	update.ContinuationToken = continuationToken
 	return yield(update, nil)
 }
