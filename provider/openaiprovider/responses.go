@@ -69,7 +69,7 @@ type responsesClient struct {
 
 type responsesNewParamsOpt responses.ResponseNewParams
 
-func (o responsesNewParamsOpt) Value() any {
+func (o responsesNewParamsOpt) MAFValue() any {
 	return responses.ResponseNewParams(o)
 }
 
@@ -391,6 +391,11 @@ func responsesBuildCompletionParams(config AgentConfig, messages []*message.Mess
 			params.Tools = append(params.Tools, responses.ToolUnionParam{
 				OfFileSearch: &variant,
 			})
+			// Request the retrieved chunks so the file_search_call output item
+			// carries its results, mirroring the reasoning-encrypted-content path.
+			if !slices.Contains(params.Include, responses.ResponseIncludableFileSearchCallResults) {
+				params.Include = append(params.Include, responses.ResponseIncludableFileSearchCallResults)
+			}
 		case *hostedtool.CodeInterpreter:
 			var variant responses.ToolCodeInterpreterParam
 			hosted := make([]string, 0, len(tl.Inputs))
@@ -585,14 +590,21 @@ func responsesBuildMessageParam(msg *message.Message, resp responses.ResponseInp
 				})
 			case *message.TextReasoningContent:
 				flushOutputContents()
-				// Reasoning content is added as a separate input item
-				var reasoning responses.ResponseReasoningItemParam
-				if c.ProtectedData != "" {
-					reasoning.EncryptedContent = openai.String(c.ProtectedData)
+				// Only replay reasoning when we hold its encrypted content (store=false).
+				// With store=true the server retains the reasoning item by id, so
+				// re-sending it would duplicate a server-side item.
+				if c.ProtectedData == "" {
+					continue
 				}
-				reasoning.Content = append(reasoning.Content, responses.ResponseReasoningItemContentParam{
-					Text: c.Text,
-				})
+				var reasoning responses.ResponseReasoningItemParam
+				// summary is required by the Responses API; send an empty array when absent.
+				reasoning.Summary = []responses.ResponseReasoningItemSummaryParam{}
+				// id is required and must match the original reasoning item; recover it.
+				if item, ok := c.RawRepresentation.(responses.ResponseReasoningItem); ok {
+					reasoning.ID = item.ID
+				}
+				// content must stay empty on input; reasoning is replayed via encrypted_content.
+				reasoning.EncryptedContent = openai.String(c.ProtectedData)
 				resp = append(resp, responses.ResponseInputItemUnionParam{
 					OfReasoning: &reasoning,
 				})
@@ -780,10 +792,11 @@ func responsesBuildMessageParam(msg *message.Message, resp responses.ResponseInp
 						outputContent,
 					))
 				} else {
-					// Default case - convert to string
+					// Default case - convert to string (JSON-encode structured
+					// results rather than rendering them with Go's %v).
 					resp = append(resp, responses.ResponseInputItemParamOfFunctionCallOutput(
 						funcResult.CallID,
-						fmt.Sprintf("%v", ret),
+						toolResultText(ret),
 					))
 				}
 
@@ -945,6 +958,9 @@ func responsesProcessResponse(resp *responses.Response, seqNum int64, yield func
 			}
 			currentUpdate.Contents = append(currentUpdate.Contents, &output)
 
+		case responses.ResponseFileSearchToolCall:
+			currentUpdate.Contents = append(currentUpdate.Contents, fileSearchToolCallContents(out)...)
+
 		case responses.ResponseOutputItemMcpApprovalRequest:
 			currentUpdate.Contents = append(currentUpdate.Contents, mcpApprovalRequestContent(out))
 
@@ -963,12 +979,8 @@ func responsesProcessResponse(resp *responses.Response, seqNum int64, yield func
 	if usage := responsesUsageToContent(resp.Usage); usage != nil {
 		currentUpdate.Contents = append(currentUpdate.Contents, usage)
 	}
-	// If there's an error in the response, add an ErrorContent
-	if resp.Error.Message != "" {
-		currentUpdate.Contents = append(currentUpdate.Contents, &message.ErrorContent{
-			Message:   resp.Error.Message,
-			ErrorCode: string(resp.Error.Code),
-		})
+	if failure := responsesFailureContent(resp); failure != nil {
+		currentUpdate.Contents = append(currentUpdate.Contents, failure)
 	}
 	yield(currentUpdate, nil)
 }
@@ -1014,6 +1026,35 @@ func responsesUsageToContent(usage responses.ResponseUsage) *message.UsageConten
 			CachedInputTokenCount: usage.InputTokensDetails.CachedTokens,
 			ReasoningTokenCount:   usage.OutputTokensDetails.ReasoningTokens,
 		},
+	}
+}
+
+const (
+	responsesDefaultFailureMessage = "The agent run failed."
+	responsesDefaultFailureCode    = "failed"
+)
+
+func responsesFailureContent(resp *responses.Response) *message.ErrorContent {
+	if resp == nil {
+		return nil
+	}
+	if resp.Status != responses.ResponseStatusFailed && resp.Error.Message == "" && resp.Error.Code == "" {
+		return nil
+	}
+	return responsesErrorContent(resp.Error.Message, string(resp.Error.Code), "")
+}
+
+func responsesErrorContent(msg string, code string, details string) *message.ErrorContent {
+	if strings.TrimSpace(msg) == "" {
+		msg = responsesDefaultFailureMessage
+	}
+	if code == "" {
+		code = responsesDefaultFailureCode
+	}
+	return &message.ErrorContent{
+		Message:   msg,
+		Details:   details,
+		ErrorCode: code,
 	}
 }
 
@@ -1078,6 +1119,15 @@ func responsesProcessStreamingUpdate(update responses.ResponseStreamEventUnion, 
 		u.AdditionalProperties = responsesPopulateAdditionalProperties(&event.Response)
 		if contToken := createContinuationToken(event.Response.ID, event.SequenceNumber, event.Response.Status, isBackground); contToken != "" {
 			u.ContinuationToken = contToken
+		}
+
+	case responses.ResponseFailedEvent:
+		u = createUpdate(message.RoleAssistant, nil)
+		u.CreatedAt = time.Unix(int64(event.Response.CreatedAt), 0)
+		u.ResponseID = event.Response.ID
+		u.AdditionalProperties = responsesPopulateAdditionalProperties(&event.Response)
+		if failure := responsesFailureContent(&event.Response); failure != nil {
+			u.Contents = []message.Content{failure}
 		}
 
 	case responses.ResponseTextDeltaEvent:
@@ -1187,6 +1237,8 @@ func responsesProcessStreamingUpdate(update responses.ResponseStreamEventUnion, 
 			content := &message.TextContent{Text: outputText.String()}
 			content.RawRepresentation = item
 			u.Contents = []message.Content{content}
+		case responses.ResponseFileSearchToolCall:
+			u.Contents = fileSearchToolCallContents(item)
 		case responses.ResponseOutputItemMcpApprovalRequest:
 			u.Contents = []message.Content{mcpApprovalRequestContent(item)}
 		case responses.ResponseOutputItemMcpCall:
@@ -1217,11 +1269,7 @@ func responsesProcessStreamingUpdate(update responses.ResponseStreamEventUnion, 
 		}
 	case responses.ResponseErrorEvent:
 		u = createUpdate(message.RoleAssistant, []message.Content{
-			&message.ErrorContent{
-				Message:   event.Message,
-				ErrorCode: event.Code,
-				Details:   event.Param,
-			},
+			responsesErrorContent(event.Message, event.Code, event.Param),
 		})
 		if contToken := createContinuationToken(responseID, event.SequenceNumber, responses.ResponseStatusFailed, isBackground); contToken != "" {
 			u.ContinuationToken = contToken
@@ -1234,6 +1282,43 @@ func responsesProcessStreamingUpdate(update responses.ResponseStreamEventUnion, 
 	}
 
 	return u, nil
+}
+
+// fileSearchToolCallContents surfaces a file_search_call output item as message
+// content. Each retrieved chunk becomes a TextContent carrying a CitationAnnotation
+// (file ID, filename and snippet). Previously the queries and retrieved chunks were
+// dropped and only the file_citation annotations survived; surfacing them here keeps
+// the raw item (queries + status) on RawRepresentation, matching the .NET/Python
+// surfacing of FileSearch results. When the call returns no results, a single empty
+// annotated TextContent is emitted so the call is still surfaced and, being annotated,
+// is not coalesced away (which would strip its RawRepresentation).
+func fileSearchToolCallContents(item responses.ResponseFileSearchToolCall) []message.Content {
+	if len(item.Results) == 0 {
+		textContent := &message.TextContent{
+			ContentHeader: message.ContentHeader{RawRepresentation: item},
+		}
+		textContent.Annotations = append(textContent.Annotations, &message.CitationAnnotation{
+			ToolName:          "file_search",
+			RawRepresentation: item,
+		})
+		return []message.Content{textContent}
+	}
+	contents := make([]message.Content, 0, len(item.Results))
+	for _, res := range item.Results {
+		textContent := &message.TextContent{
+			ContentHeader: message.ContentHeader{RawRepresentation: item},
+			Text:          res.Text,
+		}
+		textContent.Annotations = append(textContent.Annotations, &message.CitationAnnotation{
+			FileID:            res.FileID,
+			Title:             res.Filename,
+			Snippet:           res.Text,
+			ToolName:          "file_search",
+			RawRepresentation: res,
+		})
+		contents = append(contents, textContent)
+	}
+	return contents
 }
 
 func mcpApprovalRequestContent(item responses.ResponseOutputItemMcpApprovalRequest) *message.ToolApprovalRequestContent {
@@ -1264,12 +1349,13 @@ func mcpCallContents(item responses.ResponseOutputItemMcpCall) []message.Content
 		},
 	}
 
+	errorMessage := mcpToolCallErrorMessage(item.Error)
 	result := &message.MCPServerToolResultContent{
 		ContentHeader: message.ContentHeader{RawRepresentation: item},
 		CallID:        item.ID,
 		Name:          item.Name,
 		ServerName:    item.ServerLabel,
-		Error:         item.Error,
+		Error:         errorMessage,
 	}
 	if item.Output != "" {
 		result.Outputs = message.Contents{
@@ -1278,12 +1364,37 @@ func mcpCallContents(item responses.ResponseOutputItemMcpCall) []message.Content
 	}
 	contents = append(contents, result)
 
-	if item.Error != "" {
+	if errorMessage != "" {
 		contents = append(contents, &message.ErrorContent{
-			Message: item.Error,
+			Message: errorMessage,
 		})
 	}
 	return contents
+}
+
+func mcpToolCallErrorMessage(err responses.McpToolCallErrorUnion) string {
+	if err.Message != "" {
+		return err.Message
+	}
+	if err.Content != nil {
+		if content, ok := err.Content.(string); ok {
+			return content
+		}
+		if content, marshalErr := json.Marshal(err.Content); marshalErr == nil {
+			return string(content)
+		}
+		return fmt.Sprint(err.Content)
+	}
+
+	raw := err.RawJSON()
+	if raw == "" || raw == "null" || raw == "{}" {
+		return ""
+	}
+	var msg string
+	if json.Unmarshal([]byte(raw), &msg) == nil {
+		return msg
+	}
+	return raw
 }
 
 func imageGenerationContent(item responses.ResponseOutputItemImageGenerationCall) *message.DataContent {
