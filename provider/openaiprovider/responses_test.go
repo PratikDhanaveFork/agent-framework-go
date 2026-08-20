@@ -293,7 +293,8 @@ func TestResponsesBasicRequestResponse_NonStreaming(t *testing.T) {
 
 	a := newTestResponsesClient(server, "gpt-4o-mini")
 
-	resp, err := a.RunText(t.Context(), "hello",
+	resp, err := a.RunText(
+		t.Context(), "hello",
 		openaiprovider.ResponsesNewParams(responses.ResponseNewParams{
 			MaxOutputTokens: openai.Int(20),
 			Temperature:     openai.Float(0.5),
@@ -385,7 +386,8 @@ data: {"type":"response.completed","response":{"id":"resp_67d329fbc87c81919f8952
 	a := newTestResponsesClient(server, "gpt-4o-mini")
 
 	var updates []*agent.ResponseUpdate
-	for update, err := range a.RunText(t.Context(), "hello", agent.Stream(true),
+	for update, err := range a.RunText(
+		t.Context(), "hello", agent.Stream(true),
 		openaiprovider.ResponsesNewParams(responses.ResponseNewParams{
 			MaxOutputTokens: openai.Int(20),
 			Temperature:     openai.Float(0.5),
@@ -677,7 +679,8 @@ func TestResponsesChatOptions_Model_OverridesClientModel_NonStreaming(t *testing
 	a := newTestResponsesClient(server, "gpt-4o-mini")
 
 	// Override with gpt-4o in options
-	resp, err := a.RunText(t.Context(), "hello",
+	resp, err := a.RunText(
+		t.Context(), "hello",
 		openaiprovider.ResponsesNewParams(responses.ResponseNewParams{
 			Model:           "gpt-4o",
 			MaxOutputTokens: openai.Int(10),
@@ -781,7 +784,8 @@ func TestResponsesMultipleMessages_NonStreaming(t *testing.T) {
 		{Role: message.RoleUser, Contents: []message.Content{&message.TextContent{Text: "i'm good. how are you?"}}},
 	}
 
-	resp, err := a.Run(t.Context(), messages,
+	resp, err := a.Run(
+		t.Context(), messages,
 		openaiprovider.ResponsesNewParams(responses.ResponseNewParams{
 			Temperature: openai.Float(0.25),
 		}),
@@ -1432,6 +1436,48 @@ data: {"type":"response.completed","sequence_number":10,"response":{"id":"resp_e
 	if !strings.Contains(capturedBody, `"encrypted_content":"`+encrypted+`"`) {
 		t.Fatalf("expected replay request to carry encrypted_content %q, body = %s", encrypted, capturedBody)
 	}
+	// summary is required by the Responses API even when empty.
+	if !strings.Contains(capturedBody, `"summary":[]`) {
+		t.Fatalf("expected replay request to include an (empty) reasoning summary, body = %s", capturedBody)
+	}
+	// Plaintext reasoning content must not be replayed on input.
+	if strings.Contains(capturedBody, `"reasoning_text"`) {
+		t.Fatalf("expected replay request to omit plaintext reasoning content, body = %s", capturedBody)
+	}
+}
+
+// TestResponsesReasoningReplay_StoreTrue_SkipsReasoningItem verifies that when a
+// reasoning item has no encrypted content (store=true), it is not replayed in the
+// request. Under store=true the server retains the reasoning item by id, so
+// re-sending it would fail with a duplicate-item error.
+func TestResponsesReasoningReplay_StoreTrue_SkipsReasoningItem(t *testing.T) {
+	var capturedBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("failed reading request body: %v", err)
+		}
+		capturedBody = string(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"resp_store1","object":"response","created_at":1756752901,"status":"completed","model":"o4-mini-2025-04-16","output":[{"type":"message","id":"msg_store1","status":"completed","role":"assistant","content":[{"type":"output_text","text":"ok","annotations":[]}]}]}`)
+	}))
+	defer server.Close()
+
+	a := newTestResponsesClient(server, "o4-mini")
+	messages := []*message.Message{
+		{Role: message.RoleUser, Contents: []message.Content{&message.TextContent{Text: "Solve this problem step by step."}}},
+		{Role: message.RoleAssistant, Contents: []message.Content{
+			// No ProtectedData: reasoning was stored server-side (store=true).
+			&message.TextReasoningContent{Text: "Analyzing."},
+			&message.TextContent{Text: "The solution is 42."},
+		}},
+	}
+	if _, err := a.Run(t.Context(), messages).Collect(); err != nil {
+		t.Fatalf("replay error = %v", err)
+	}
+	if strings.Contains(capturedBody, `"type":"reasoning"`) {
+		t.Fatalf("expected reasoning item to be skipped under store=true, body = %s", capturedBody)
+	}
 }
 
 func TestResponsesChatOptions_Model_OverridesClientModel_Streaming(t *testing.T) {
@@ -1482,7 +1528,8 @@ data: {"type":"response.completed","response":{"id":"resp_streaming123","object"
 
 	var updates []*agent.ResponseUpdate
 	// Override with gpt-4o in options
-	for update, err := range a.RunText(t.Context(), "hello", agent.Stream(true),
+	for update, err := range a.RunText(
+		t.Context(), "hello", agent.Stream(true),
 		openaiprovider.ResponsesNewParams(responses.ResponseNewParams{
 			Model:           "gpt-4o",
 			MaxOutputTokens: openai.Int(20),
@@ -1610,7 +1657,8 @@ func TestResponsesMultipleOutputItems_NonStreaming(t *testing.T) {
 
 	a := newTestResponsesClient(server, "gpt-4o-mini")
 
-	resp, err := a.RunText(t.Context(), "hello",
+	resp, err := a.RunText(
+		t.Context(), "hello",
 		openaiprovider.ResponsesNewParams(responses.ResponseNewParams{
 			MaxOutputTokens: openai.Int(20),
 			Temperature:     openai.Float(0.5),
@@ -1811,7 +1859,8 @@ func TestResponsesFunctionCallWithResult_NonStreaming(t *testing.T) {
 		Description: "Get the current weather",
 	}, getWeather)
 
-	resp1, err := a1.RunText(t.Context(), "What's the weather in Seattle?",
+	resp1, err := a1.RunText(
+		t.Context(), "What's the weather in Seattle?",
 		agent.WithTool(tool),
 	).Collect()
 	if err != nil {
@@ -1862,7 +1911,8 @@ func TestResponsesFunctionCallWithResult_NonStreaming(t *testing.T) {
 		}},
 	}
 
-	resp2, err := a2.Run(t.Context(), messages,
+	resp2, err := a2.Run(
+		t.Context(), messages,
 		agent.WithTool(tool),
 	).Collect()
 	if err != nil {
@@ -2006,7 +2056,8 @@ func TestResponsesFunctionCall_UsesCallIDWhenDifferentFromID(t *testing.T) {
 		Description: "Get the current weather",
 	}, getWeather)
 
-	resp1, err := a1.RunText(t.Context(), "What's the weather in Amsterdam?",
+	resp1, err := a1.RunText(
+		t.Context(), "What's the weather in Amsterdam?",
 		agent.WithTool(weatherTool),
 	).Collect()
 	if err != nil {
@@ -2053,7 +2104,8 @@ func TestResponsesFunctionCall_UsesCallIDWhenDifferentFromID(t *testing.T) {
 		}},
 	}
 
-	resp2, err := a2.Run(t.Context(), messages,
+	resp2, err := a2.Run(
+		t.Context(), messages,
 		agent.WithTool(weatherTool),
 	).Collect()
 	if err != nil {
@@ -2636,6 +2688,28 @@ data: {"type":"response.failed","response":{"id":"resp_001","object":"response",
 		t.Errorf("expected at least 2 updates, got %d", len(updates))
 	}
 
+	var errorContent *message.ErrorContent
+	for _, update := range updates {
+		for _, content := range update.Contents {
+			if ec, ok := content.(*message.ErrorContent); ok {
+				errorContent = ec
+				break
+			}
+		}
+		if errorContent != nil {
+			break
+		}
+	}
+	if errorContent == nil {
+		t.Fatal("expected response.failed update to surface ErrorContent")
+	}
+	if errorContent.Message != "Internal error" {
+		t.Errorf("expected error message %q, got %q", "Internal error", errorContent.Message)
+	}
+	if errorContent.ErrorCode != "internal_error" {
+		t.Errorf("expected error code %q, got %q", "internal_error", errorContent.ErrorCode)
+	}
+
 	// Verify all updates have the same response ID
 	for i, update := range updates {
 		if update.ResponseID != "resp_001" {
@@ -2882,7 +2956,8 @@ func TestResponsesCodeInterpreterTool_NonStreaming(t *testing.T) {
 
 	a := newTestResponsesClient(server, "gpt-4o-mini")
 
-	resp, err := a.RunText(t.Context(), "Calculate the sum of numbers from 1 to 5",
+	resp, err := a.RunText(
+		t.Context(), "Calculate the sum of numbers from 1 to 5",
 		agent.WithTool(&hostedtool.CodeInterpreter{}),
 	).Collect()
 	if err != nil {
@@ -3013,7 +3088,8 @@ data: {"type":"response.completed","response":{"id":"resp_002","object":"respons
 
 	var updates []*agent.ResponseUpdate
 	var allText strings.Builder
-	for update, err := range a.RunText(t.Context(), "Calculate 3+3", agent.Stream(true),
+	for update, err := range a.RunText(
+		t.Context(), "Calculate 3+3", agent.Stream(true),
 		agent.WithTool(&hostedtool.CodeInterpreter{}),
 	) {
 		if err != nil {
@@ -3100,6 +3176,312 @@ func TestResponsesCodeInterpreterTool_IncludeNotDuplicatedWhenCallerSupplied(t *
 	).Collect()
 	if err != nil {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestResponsesFileSearchTool_NonStreaming(t *testing.T) {
+	const input = `
+            {
+                "model":"gpt-4o-mini",
+                "input":[{
+                    "type":"message",
+                    "role":"user",
+                    "content":[{"type":"input_text","text":"What does the doc say?"}]
+                }],
+                "include":["file_search_call.results"],
+                "tools":[{
+                    "type":"file_search",
+                    "vector_store_ids":["vs_abc"]
+                }]
+            }
+            `
+
+	const output = `
+            {
+              "id":"resp_fs_001",
+              "object":"response",
+              "created_at":1761309813,
+              "status":"completed",
+              "model":"gpt-4o-mini",
+              "output":[
+                {
+                  "id":"fs_001",
+                  "type":"file_search_call",
+                  "status":"completed",
+                  "queries":["what does the doc say"],
+                  "results":[
+                    {
+                      "file_id":"file_abc",
+                      "filename":"doc.txt",
+                      "score":0.87,
+                      "text":"The doc says hello."
+                    }
+                  ]
+                },
+                {
+                  "id":"msg_fs_001",
+                  "type":"message",
+                  "status":"completed",
+                  "content":[{"type":"output_text","annotations":[],"text":"It says hello."}],
+                  "role":"assistant"
+                }
+              ],
+              "usage":{"input_tokens":20,"output_tokens":5,"total_tokens":25}
+            }
+            `
+
+	server := newTestResponsesServer(t, input, output)
+	defer server.Close()
+
+	a := newTestResponsesClient(server, "gpt-4o-mini")
+
+	resp, err := a.RunText(t.Context(), "What does the doc say?",
+		agent.WithTool(&hostedtool.FileSearch{
+			Inputs: []message.Content{&message.HostedVectorStoreContent{VectorStoreID: "vs_abc"}},
+		}),
+	).Collect()
+	if err != nil {
+		t.Fatalf("error = %v", err)
+	}
+
+	if len(resp.Messages) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(resp.Messages))
+	}
+
+	// Locate the TextContent surfaced from the file_search_call results.
+	var found *message.TextContent
+	for _, c := range resp.Messages[0].Contents {
+		tc, ok := c.(*message.TextContent)
+		if !ok {
+			continue
+		}
+		for _, ann := range tc.Annotations {
+			if ca, ok := ann.(*message.CitationAnnotation); ok && ca.FileID == "file_abc" {
+				found = tc
+				break
+			}
+		}
+		if found != nil {
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("expected a TextContent surfacing the file_search_call result, got contents %+v", resp.Messages[0].Contents)
+	}
+	if found.Text != "The doc says hello." {
+		t.Errorf("expected retrieved text to be surfaced, got %q", found.Text)
+	}
+
+	citation, ok := found.Annotations[0].(*message.CitationAnnotation)
+	if !ok {
+		t.Fatalf("expected CitationAnnotation, got %T", found.Annotations[0])
+	}
+	if citation.FileID != "file_abc" {
+		t.Errorf("expected FileID file_abc, got %q", citation.FileID)
+	}
+	if citation.Title != "doc.txt" {
+		t.Errorf("expected Title doc.txt, got %q", citation.Title)
+	}
+}
+
+func TestResponsesFileSearchTool_Streaming(t *testing.T) {
+	const input = `
+            {
+                "model":"gpt-4o-mini",
+                "input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"search"}]}],
+                "include":["file_search_call.results"],
+                "tools":[{"type":"file_search","vector_store_ids":["vs_abc"]}],
+                "stream":true
+            }
+            `
+
+	const output = `event: response.created
+data: {"type":"response.created","response":{"id":"resp_fs_str","object":"response","created_at":1741892091,"status":"in_progress","model":"gpt-4o-mini","output":[]}}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","response_id":"resp_fs_str","output_index":0,"item":{"type":"file_search_call","id":"fs_str","status":"completed","queries":["search"],"results":[{"file_id":"file_str","filename":"notes.md","score":0.9,"text":"streamed chunk"}]}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_fs_str","object":"response","created_at":1741892091,"status":"completed","model":"gpt-4o-mini","output":[{"type":"file_search_call","id":"fs_str","status":"completed","queries":["search"],"results":[{"file_id":"file_str","filename":"notes.md","score":0.9,"text":"streamed chunk"}]}]}}
+
+`
+
+	server := newTestResponsesServerStreaming(t, input, output)
+	defer server.Close()
+
+	a := newTestResponsesClient(server, "gpt-4o-mini")
+
+	var found *message.TextContent
+	for update, err := range a.RunText(t.Context(), "search",
+		agent.Stream(true),
+		agent.WithTool(&hostedtool.FileSearch{
+			Inputs: []message.Content{&message.HostedVectorStoreContent{VectorStoreID: "vs_abc"}},
+		}),
+	) {
+		if err != nil {
+			t.Fatalf("error = %v", err)
+		}
+		for _, c := range update.Contents {
+			tc, ok := c.(*message.TextContent)
+			if !ok {
+				continue
+			}
+			for _, ann := range tc.Annotations {
+				if ca, ok := ann.(*message.CitationAnnotation); ok && ca.FileID == "file_str" {
+					found = tc
+				}
+			}
+		}
+	}
+	if found == nil {
+		t.Fatal("expected the streamed file_search_call result to be surfaced")
+	}
+	if found.Text != "streamed chunk" {
+		t.Errorf("expected retrieved text 'streamed chunk', got %q", found.Text)
+	}
+}
+
+func TestResponsesFileSearchTool_DoesNotDuplicateInclude(t *testing.T) {
+	// The include is requested by the FileSearch tool; if the caller already set it
+	// via ResponsesNewParams, it must not be appended twice.
+	const input = `
+            {
+                "model":"gpt-4o-mini",
+                "input":[{
+                    "type":"message",
+                    "role":"user",
+                    "content":[{"type":"input_text","text":"hi"}]
+                }],
+                "include":["file_search_call.results"],
+                "tools":[{
+                    "type":"file_search",
+                    "vector_store_ids":["vs_abc"]
+                }]
+            }
+            `
+
+	const output = `
+            {
+              "id":"resp_fs_002",
+              "object":"response",
+              "created_at":1761309813,
+              "status":"completed",
+              "model":"gpt-4o-mini",
+              "output":[{
+                "type":"message",
+                "id":"msg_fs_002",
+                "status":"completed",
+                "role":"assistant",
+                "content":[{"type":"output_text","annotations":[],"text":"hi"}]
+              }]
+            }
+            `
+
+	server := newTestResponsesServer(t, input, output)
+	defer server.Close()
+
+	a := newTestResponsesClient(server, "gpt-4o-mini")
+
+	_, err := a.RunText(t.Context(), "hi",
+		openaiprovider.ResponsesNewParams(responses.ResponseNewParams{
+			Include: []responses.ResponseIncludable{responses.ResponseIncludableFileSearchCallResults},
+		}),
+		agent.WithTool(&hostedtool.FileSearch{
+			Inputs: []message.Content{&message.HostedVectorStoreContent{VectorStoreID: "vs_abc"}},
+		}),
+	).Collect()
+	if err != nil {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestResponsesFileSearchTool_NoResultsStillSurfaced(t *testing.T) {
+	// A file_search_call with zero results must still be surfaced as an annotated
+	// TextContent so the call (queries + status on RawRepresentation) is not dropped
+	// and, being annotated, is not coalesced away.
+	const input = `
+            {
+                "model":"gpt-4o-mini",
+                "input":[{
+                    "type":"message",
+                    "role":"user",
+                    "content":[{"type":"input_text","text":"anything?"}]
+                }],
+                "include":["file_search_call.results"],
+                "tools":[{
+                    "type":"file_search",
+                    "vector_store_ids":["vs_abc"]
+                }]
+            }
+            `
+
+	const output = `
+            {
+              "id":"resp_fs_003",
+              "object":"response",
+              "created_at":1761309813,
+              "status":"completed",
+              "model":"gpt-4o-mini",
+              "output":[
+                {
+                  "id":"fs_003",
+                  "type":"file_search_call",
+                  "status":"completed",
+                  "queries":["anything"],
+                  "results":[]
+                },
+                {
+                  "id":"msg_fs_003",
+                  "type":"message",
+                  "status":"completed",
+                  "content":[{"type":"output_text","annotations":[],"text":"Nothing found."}],
+                  "role":"assistant"
+                }
+              ],
+              "usage":{"input_tokens":20,"output_tokens":5,"total_tokens":25}
+            }
+            `
+
+	server := newTestResponsesServer(t, input, output)
+	defer server.Close()
+
+	a := newTestResponsesClient(server, "gpt-4o-mini")
+
+	resp, err := a.RunText(t.Context(), "anything?",
+		agent.WithTool(&hostedtool.FileSearch{
+			Inputs: []message.Content{&message.HostedVectorStoreContent{VectorStoreID: "vs_abc"}},
+		}),
+	).Collect()
+	if err != nil {
+		t.Fatalf("error = %v", err)
+	}
+
+	if len(resp.Messages) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(resp.Messages))
+	}
+
+	// Find the annotated TextContent surfacing the (empty) file_search_call.
+	var found *message.TextContent
+	for _, c := range resp.Messages[0].Contents {
+		tc, ok := c.(*message.TextContent)
+		if !ok {
+			continue
+		}
+		for _, ann := range tc.Annotations {
+			if ca, ok := ann.(*message.CitationAnnotation); ok && ca.ToolName == "file_search" {
+				found = tc
+				break
+			}
+		}
+		if found != nil {
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("expected an annotated TextContent surfacing the empty file_search_call, got contents %+v", resp.Messages[0].Contents)
+	}
+	if found.RawRepresentation == nil {
+		t.Error("expected the empty file_search_call to retain its RawRepresentation")
 	}
 }
 
@@ -3868,6 +4250,57 @@ func TestResponsesResponseWithError_IncludesInAdditionalPropertiesAndMessage(t *
 	}
 }
 
+func TestResponsesResponseWithFailedStatusWithoutErrorDetails_UsesDefaultErrorContent(t *testing.T) {
+	const input = `
+            {
+                "model":"gpt-4o-mini",
+                "input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"test"}]}]
+            }
+            `
+
+	const output = `
+            {
+              "id":"resp_004",
+              "object":"response",
+              "created_at":1741892091,
+              "status":"failed",
+              "model":"gpt-4o-mini",
+              "output":[]
+            }
+            `
+
+	server := newTestResponsesServer(t, input, output)
+	defer server.Close()
+
+	a := newTestResponsesClient(server, "gpt-4o-mini")
+
+	resp, err := a.RunText(t.Context(), "test").Collect()
+	if err != nil {
+		t.Fatalf("error = %v", err)
+	}
+	if len(resp.Messages) == 0 {
+		t.Fatal("expected at least one message")
+	}
+
+	lastMessage := resp.Messages[len(resp.Messages)-1]
+	var errorContent *message.ErrorContent
+	for _, content := range lastMessage.Contents {
+		if ec, ok := content.(*message.ErrorContent); ok {
+			errorContent = ec
+			break
+		}
+	}
+	if errorContent == nil {
+		t.Fatal("expected ErrorContent in last message")
+	}
+	if errorContent.Message != "The agent run failed." {
+		t.Errorf("expected default error message, got %q", errorContent.Message)
+	}
+	if errorContent.ErrorCode != "failed" {
+		t.Errorf("expected default error code, got %q", errorContent.ErrorCode)
+	}
+}
+
 func TestResponsesStreamingErrorUpdate_ActualErroneousFormat_ParsesCorrectly(t *testing.T) {
 	const input = `
             {
@@ -3953,11 +4386,11 @@ data: {"type":"response.failed","sequence_number":2,"response":{"id":"resp_003",
 		updates = append(updates, update)
 	}
 
-	// Find error update with empty error information
+	// Find synthesized failure content from the response.failed event.
 	var errorUpdate *agent.ResponseUpdate
 	for _, update := range updates {
 		for _, content := range update.Contents {
-			if _, ok := content.(*message.ErrorContent); ok {
+			if ec, ok := content.(*message.ErrorContent); ok && ec.Message == "The agent run failed." {
 				errorUpdate = update
 				break
 			}
@@ -3971,7 +4404,6 @@ data: {"type":"response.failed","sequence_number":2,"response":{"id":"resp_003",
 		t.Fatal("expected to find an update with ErrorContent")
 	}
 
-	// Verify error content has empty fields
 	var errorContent *message.ErrorContent
 	for _, content := range errorUpdate.Contents {
 		if ec, ok := content.(*message.ErrorContent); ok {
@@ -3983,13 +4415,11 @@ data: {"type":"response.failed","sequence_number":2,"response":{"id":"resp_003",
 	if errorContent == nil {
 		t.Fatal("expected ErrorContent in error update")
 	}
-
-	// Verify all fields are empty (like C#)
-	if errorContent.Message != "" {
-		t.Errorf("expected empty Message, got %q", errorContent.Message)
+	if errorContent.Message != "The agent run failed." {
+		t.Errorf("expected default Message, got %q", errorContent.Message)
 	}
-	if errorContent.ErrorCode != "" {
-		t.Errorf("expected empty ErrorCode, got %q", errorContent.ErrorCode)
+	if errorContent.ErrorCode != "failed" {
+		t.Errorf("expected default ErrorCode, got %q", errorContent.ErrorCode)
 	}
 	if errorContent.Details != "" {
 		t.Errorf("expected empty Details, got %q", errorContent.Details)
@@ -5128,7 +5558,8 @@ func TestResponsesConversationId_AsResponseId_NonStreaming(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = a.RunText(t.Context(), "hello",
+	_, err = a.RunText(
+		t.Context(), "hello",
 		openaiprovider.ResponsesNewParams(responses.ResponseNewParams{
 			MaxOutputTokens: openai.Int(20),
 			Temperature:     openai.Float(0.5),
@@ -5200,7 +5631,8 @@ func TestDisableStoreOutputDoesNotUseOrUpdateResponseID(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = a.RunText(t.Context(), "hello",
+	_, err = a.RunText(
+		t.Context(), "hello",
 		agent.WithSession(session),
 	).Collect()
 	if err != nil {
@@ -5266,7 +5698,8 @@ func TestResponsesNewParamsStoreOverridesDisableStoreOutput(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = a.RunText(t.Context(), "hello",
+	_, err = a.RunText(
+		t.Context(), "hello",
 		agent.WithSession(session),
 		openaiprovider.ResponsesNewParams(responses.ResponseNewParams{Store: openai.Bool(true)}),
 	).Collect()
@@ -5333,7 +5766,8 @@ func TestResponsesNewParamsStoreFalseDoesNotUpdateResponseID(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = a.RunText(t.Context(), "hello",
+	_, err = a.RunText(
+		t.Context(), "hello",
 		agent.WithSession(session),
 		openaiprovider.ResponsesNewParams(responses.ResponseNewParams{Store: openai.Bool(false)}),
 	).Collect()
@@ -5388,7 +5822,8 @@ func TestResponsesNewParamsStoreFalseDoesNotDuplicateReasoningInclude(t *testing
 		},
 	)
 
-	_, err := a.RunText(t.Context(), "hello",
+	_, err := a.RunText(
+		t.Context(), "hello",
 		openaiprovider.ResponsesNewParams(responses.ResponseNewParams{
 			Store:   openai.Bool(false),
 			Include: []responses.ResponseIncludable{responses.ResponseIncludableReasoningEncryptedContent},
@@ -5448,7 +5883,8 @@ func TestResponsesConversationId_AsConversationId_NonStreaming(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = a.RunText(t.Context(), "hello",
+	_, err = a.RunText(
+		t.Context(), "hello",
 		openaiprovider.ResponsesNewParams(responses.ResponseNewParams{
 			MaxOutputTokens: openai.Int(20),
 			Temperature:     openai.Float(0.5),
@@ -5520,7 +5956,8 @@ data: {"type":"response.completed","response":{"id":"resp_67890","object":"respo
 	}
 
 	var updates []*agent.ResponseUpdate
-	for update, err := range a.RunText(t.Context(), "hello", agent.Stream(true),
+	for update, err := range a.RunText(
+		t.Context(), "hello", agent.Stream(true),
 		openaiprovider.ResponsesNewParams(responses.ResponseNewParams{
 			MaxOutputTokens: openai.Int(20),
 			Temperature:     openai.Float(0.5),
@@ -5599,7 +6036,8 @@ data: {"type":"response.completed","response":{"id":"resp_67890","object":"respo
 	}
 
 	var updates []*agent.ResponseUpdate
-	for update, err := range a.RunText(t.Context(), "hello", agent.Stream(true),
+	for update, err := range a.RunText(
+		t.Context(), "hello", agent.Stream(true),
 		openaiprovider.ResponsesNewParams(responses.ResponseNewParams{
 			MaxOutputTokens: openai.Int(20),
 			Temperature:     openai.Float(0.5),
@@ -5659,7 +6097,8 @@ func TestResponsesBackgroundResponses_FirstCall(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	resp, err := a.RunText(t.Context(), "hello",
+	resp, err := a.RunText(
+		t.Context(), "hello",
 		openaiprovider.ResponsesNewParams(responses.ResponseNewParams{
 			MaxOutputTokens: openai.Int(20),
 			Temperature:     openai.Float(0.5),
@@ -5742,7 +6181,8 @@ func testResponsesBackgroundPolling(t *testing.T, status string) {
 	}
 	ctJSON, _ := json.Marshal(ct)
 
-	resp, err := a.Run(t.Context(), nil,
+	resp, err := a.Run(
+		t.Context(), nil,
 		agent.WithContinuationToken(agenttest.NewContinuationToken(t, string(ctJSON))),
 		agent.AllowBackgroundResponses(true),
 		agent.WithSession(session),
@@ -5863,7 +6303,8 @@ data: {"type":"response.completed","sequence_number":17,"response":{"id":"resp_6
 
 	var updates []*agent.ResponseUpdate
 	var allText strings.Builder
-	for update, err := range a.RunText(t.Context(), "hello", agent.Stream(true),
+	for update, err := range a.RunText(
+		t.Context(), "hello", agent.Stream(true),
 		agent.AllowBackgroundResponses(true),
 		agent.WithSession(session),
 	) {
@@ -5966,7 +6407,8 @@ data: {"type":"response.completed","sequence_number":17,"response":{"truncation"
 	}
 
 	var updates []*agent.ResponseUpdate
-	for update, err := range a.Run(t.Context(), []*message.Message{}, agent.Stream(true),
+	for update, err := range a.Run(
+		t.Context(), []*message.Message{}, agent.Stream(true),
 		agent.AllowBackgroundResponses(true),
 		agent.WithContinuationToken(token),
 		agent.WithSession(session),
@@ -6027,7 +6469,8 @@ func TestResponsesGetContinuationToken_WithMessages_ThrowsException(t *testing.T
 	token := agenttest.NewContinuationToken(t, `{"response_id":"resp_123","sequence_number":0}`)
 
 	// Attempt to use continuation token with messages should error
-	_, err := a.RunText(t.Context(), "test",
+	_, err := a.RunText(
+		t.Context(), "test",
 		agent.WithContinuationToken(token),
 	).Collect()
 
@@ -6052,7 +6495,8 @@ func TestResponsesBackgroundResponses_PollingCall_WithMessages(t *testing.T) {
 	token := agenttest.NewContinuationToken(t, `{"response_id":"resp_68d3d2c9ef7c8195863e4e2b2ec226a205007262ecbbfed8","sequence_number":0}`)
 
 	// A try to update a background response with new messages should fail
-	_, err = a.RunText(t.Context(), "Please book hotel as well",
+	_, err = a.RunText(
+		t.Context(), "Please book hotel as well",
 		agent.WithSession(session),
 		agent.WithContinuationToken(token),
 		agent.AllowBackgroundResponses(true),
@@ -6228,7 +6672,8 @@ func TestResponsesMultipleRequiredFunctions(t *testing.T) {
 		Description: "Get the current time for a location",
 	}, getTime)
 
-	resp, err := a.RunText(t.Context(), "What's the weather and time in Seattle?",
+	resp, err := a.RunText(
+		t.Context(), "What's the weather and time in Seattle?",
 		agent.WithTool(weatherTool),
 		agent.WithTool(timeTool),
 		agent.WithToolMode(tool.RequireTools("GetWeather", "GetTime")),
@@ -6422,7 +6867,43 @@ data: {"type":"response.failed","response":{"id":"resp_001","object":"response",
 	if errContent.ErrorCode != "server_error" {
 		t.Errorf("error code = %q, want %q", errContent.ErrorCode, "server_error")
 	}
-	if errContent.Message != "" {
-		t.Errorf("error message = %q, want empty", errContent.Message)
+}
+
+// TestResponsesToolResult_StructSerializedAsJSON verifies that a structured
+// FunctionResultContent.Result is JSON-encoded in the Responses API request
+// rather than rendered with Go's %v (matching the chat path).
+func TestResponsesToolResult_StructSerializedAsJSON(t *testing.T) {
+	capturedCh := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		capturedCh <- string(b)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"resp_test","object":"response","created_at":1741891428,"status":"completed","error":null,"incomplete_details":null,"model":"gpt-4o-mini","output":[{"type":"message","id":"msg_test","status":"completed","role":"assistant","content":[{"type":"output_text","text":"ok","annotations":[]}]}]}`)
+	}))
+	defer server.Close()
+	a := newTestResponsesClient(server, "gpt-4o-mini")
+
+	type weather struct {
+		City  string `json:"city"`
+		TempC int    `json:"temp_c"`
+	}
+	messages := []*message.Message{
+		{Role: message.RoleUser, Contents: []message.Content{&message.TextContent{Text: "weather?"}}},
+		{Role: message.RoleAssistant, Contents: []message.Content{
+			&message.FunctionCallContent{CallID: "c1", Name: "GetWeather", Arguments: "{}"},
+		}},
+		{Role: message.RoleTool, Contents: []message.Content{
+			&message.FunctionResultContent{CallID: "c1", Result: weather{City: "Paris", TempC: 20}},
+		}},
+	}
+	if _, err := a.Run(t.Context(), messages).Collect(); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	captured := <-capturedCh
+	if strings.Contains(captured, "{Paris 20}") {
+		t.Errorf("tool result rendered with Go %%v instead of JSON:\n%s", captured)
+	}
+	if !strings.Contains(captured, "temp_c") {
+		t.Errorf("tool result was not JSON-encoded (missing field temp_c):\n%s", captured)
 	}
 }
