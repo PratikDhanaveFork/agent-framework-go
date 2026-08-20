@@ -79,16 +79,23 @@ func (index *MessageIndex) Update(messages []*message.Message) {
 		return
 	}
 	processedMessageCount := index.includedRawMessageCount()
-	if index.lastProcessedMessage != nil && len(messages) >= processedMessageCount && messageContentEqual(messages[len(messages)-1], index.lastProcessedMessage) {
-		return
-	}
-
+	// Locate where the already-processed prefix ends. lastProcessedMessage sits
+	// at index processedMessageCount-1 when nothing earlier was trimmed, so check
+	// that expected position first. Matching only the last occurrence of its
+	// content would latch the boundary onto a later duplicate when a message is
+	// repeated (e.g. a user re-sending "continue"), silently dropping the turns
+	// appended since. Fall back to a search only when the prefix was trimmed.
 	foundIndex := -1
 	if index.lastProcessedMessage != nil {
-		for i := len(messages) - 1; i >= 0; i-- {
-			if messageContentEqual(messages[i], index.lastProcessedMessage) {
-				foundIndex = i
-				break
+		if expected := processedMessageCount - 1; expected >= 0 && expected < len(messages) &&
+			messageContentEqual(messages[expected], index.lastProcessedMessage) {
+			foundIndex = expected
+		} else {
+			for i := len(messages) - 1; i >= 0; i-- {
+				if messageContentEqual(messages[i], index.lastProcessedMessage) {
+					foundIndex = i
+					break
+				}
 			}
 		}
 	}
@@ -175,7 +182,7 @@ func (index *MessageIndex) AddGroup(kind GroupKind, messages []*message.Message,
 func (index *MessageIndex) IncludedMessages() []*message.Message {
 	var messages []*message.Message
 	for _, group := range index.Groups {
-		if !group.IsExcluded {
+		if group.isIncluded() {
 			messages = append(messages, group.Messages...)
 		}
 	}
@@ -225,7 +232,7 @@ func (index *MessageIndex) TotalTokenCount() int {
 func (index *MessageIndex) IncludedGroupCount() int {
 	var total int
 	for _, group := range index.Groups {
-		if !group.IsExcluded {
+		if group.isIncluded() {
 			total++
 		}
 	}
@@ -236,7 +243,7 @@ func (index *MessageIndex) IncludedGroupCount() int {
 func (index *MessageIndex) IncludedMessageCount() int {
 	var total int
 	for _, group := range index.Groups {
-		if !group.IsExcluded {
+		if group.isIncluded() {
 			total += group.MessageCount
 		}
 	}
@@ -247,7 +254,7 @@ func (index *MessageIndex) IncludedMessageCount() int {
 func (index *MessageIndex) IncludedByteCount() int {
 	var total int
 	for _, group := range index.Groups {
-		if !group.IsExcluded {
+		if group.isIncluded() {
 			total += group.ByteCount
 		}
 	}
@@ -258,7 +265,7 @@ func (index *MessageIndex) IncludedByteCount() int {
 func (index *MessageIndex) IncludedTokenCount() int {
 	var total int
 	for _, group := range index.Groups {
-		if !group.IsExcluded {
+		if group.isIncluded() {
 			total += group.TokenCount
 		}
 	}
@@ -280,7 +287,7 @@ func (index *MessageIndex) TotalTurnCount() int {
 func (index *MessageIndex) IncludedTurnCount() int {
 	seen := make(map[int]bool)
 	for _, group := range index.Groups {
-		if !group.IsExcluded && group.TurnIndex != nil && *group.TurnIndex > 0 {
+		if group.isIncluded() && group.TurnIndex != nil && *group.TurnIndex > 0 {
 			seen[*group.TurnIndex] = true
 		}
 	}
@@ -291,11 +298,21 @@ func (index *MessageIndex) IncludedTurnCount() int {
 func (index *MessageIndex) IncludedNonSystemGroupCount() int {
 	var total int
 	for _, group := range index.Groups {
-		if !group.IsExcluded && group.Kind != GroupKindSystem {
+		if group.isIncludedNonSystem() {
 			total++
 		}
 	}
 	return total
+}
+
+func (index *MessageIndex) includedNonSystemGroupIndices() []int {
+	var indices []int
+	for i, group := range index.Groups {
+		if group.isIncludedNonSystem() {
+			indices = append(indices, i)
+		}
+	}
+	return indices
 }
 
 // RawMessageCount returns the number of original messages represented by the index.
@@ -304,7 +321,7 @@ func (index *MessageIndex) IncludedNonSystemGroupCount() int {
 func (index *MessageIndex) RawMessageCount() int {
 	var total int
 	for _, group := range index.Groups {
-		if group.Kind != GroupKindSummary {
+		if group.isRaw() {
 			total += group.MessageCount
 		}
 	}
@@ -314,7 +331,7 @@ func (index *MessageIndex) RawMessageCount() int {
 func (index *MessageIndex) includedRawMessageCount() int {
 	var total int
 	for _, group := range index.Groups {
-		if !group.IsExcluded && group.Kind != GroupKindSummary {
+		if group.isIncluded() && group.isRaw() {
 			total += group.MessageCount
 		}
 	}
