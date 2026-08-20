@@ -24,7 +24,7 @@ import (
 
 type messageNewParamsOpt anthropic.MessageNewParams
 
-func (o messageNewParamsOpt) Value() any { return anthropic.MessageNewParams(o) }
+func (o messageNewParamsOpt) MAFValue() any { return anthropic.MessageNewParams(o) }
 
 // MessageNewParams allows passing custom parameters to the underlying anthropic API calls.
 func MessageNewParams(params anthropic.MessageNewParams) agent.Option {
@@ -144,7 +144,15 @@ func (a *client) run(ctx context.Context, messages []*message.Message, options .
 				messageID = cmp.Or(messageID, event.Message.ID)
 				usage.Add(toUsageDetails(event.Message.Usage))
 			case anthropic.MessageDeltaEvent:
-				usage.Add(toUsageDetailsDelta(event.Usage))
+				// Anthropic reports the final cumulative output token count on
+				// message_delta, superseding the placeholder output count from
+				// message_start. Overwrite the output-derived counts from the
+				// delta instead of summing them; adding would double-count the
+				// message_start placeholder (and any earlier delta).
+				delta := toUsageDetailsDelta(event.Usage)
+				usage.OutputTokenCount = delta.OutputTokenCount
+				usage.ReasoningTokenCount = delta.ReasoningTokenCount
+				usage.TotalTokenCount = usage.InputTokenCount + usage.OutputTokenCount
 				// Later chunks may carry an empty stop_reason; don't clobber a
 				// value we already captured.
 				if fr := mapStopReason(event.Delta.StopReason); fr != "" {
@@ -359,22 +367,9 @@ func (a *client) buildMessageParams(messages []*message.Message, opts []agent.Op
 			var properties any
 			var required []string
 
-			// Extract schema details - first convert to map[string]any if needed
-			schema := ft.Schema()
-			var schemaMap map[string]any
-
-			switch s := schema.(type) {
-			case map[string]any:
-				schemaMap = s
-			default:
-				// For *jsonschema.Schema or other types, marshal to JSON then unmarshal to map
-				if schema != nil {
-					jsonBytes, err := json.Marshal(schema)
-					if err == nil {
-						_ = json.Unmarshal(jsonBytes, &schemaMap)
-					}
-				}
-			}
+			// Preserve existing lenient tool schema handling: unusable schemas
+			// simply leave properties and required empty.
+			schemaMap, _ := schemaMapFromAny(ft.Schema())
 
 			if schemaMap != nil {
 				if props, ok := schemaMap["properties"]; ok {
@@ -453,18 +448,9 @@ func (a *client) buildMessageParams(messages []*message.Message, opts []agent.Op
 	if frmt, ok := agent.GetOption(opts, agent.WithResponseFormat); ok {
 		if frmt.Kind == "json" {
 			if schema := frmt.Schema; schema != nil {
-				var schemaMap map[string]any
-				switch s := schema.(type) {
-				case map[string]any:
-					schemaMap = s
-				default:
-					jsonBytes, err := json.Marshal(s)
-					if err != nil {
-						return anthropic.MessageNewParams{}, fmt.Errorf("failed to marshal structured output schema: %w", err)
-					}
-					if err := json.Unmarshal(jsonBytes, &schemaMap); err != nil {
-						return anthropic.MessageNewParams{}, fmt.Errorf("failed to unmarshal structured output schema: %w", err)
-					}
+				schemaMap, err := schemaMapFromAny(schema)
+				if err != nil {
+					return anthropic.MessageNewParams{}, err
 				}
 				if schemaMap != nil {
 					params.OutputConfig.Format = anthropic.JSONOutputFormatParam{
@@ -507,6 +493,25 @@ func (a *client) buildMessageParams(messages []*message.Message, opts []agent.Op
 	return params, nil
 }
 
+func schemaMapFromAny(schema any) (map[string]any, error) {
+	switch s := schema.(type) {
+	case nil:
+		return nil, nil
+	case map[string]any:
+		return s, nil
+	default:
+		jsonBytes, err := json.Marshal(s)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal structured output schema: %w", err)
+		}
+		var schemaMap map[string]any
+		if err := json.Unmarshal(jsonBytes, &schemaMap); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal structured output schema: %w", err)
+		}
+		return schemaMap, nil
+	}
+}
+
 func buildMessageParam(msg *message.Message) (anthropic.MessageParam, error) {
 	var content []anthropic.ContentBlockParamUnion
 
@@ -531,20 +536,29 @@ func buildMessageParam(msg *message.Message) (anthropic.MessageParam, error) {
 			content = append(content, anthropic.NewToolUseBlock(c.CallID, args, c.Name))
 		case *message.FunctionResultContent:
 			resStr := ""
-			switch r := c.Result.(type) {
-			case json.RawMessage:
-				resStr = string(r)
-			case string:
-				resStr = r
-			case []byte:
-				resStr = string(r)
+			switch {
+			case c.Error != nil:
+				// Surface the diagnostic text so the model sees why the tool
+				// failed, mirroring the other providers (OpenAI Responses sends
+				// "Error: %v", Gemini sends {"error": ...}). Otherwise a failed
+				// result with a nil Result would serialize to the literal "null".
+				resStr = "Error: " + c.Error.Error()
 			default:
-				// Marshal any other type to JSON for proper formatting
-				jsonBytes, err := json.Marshal(c.Result)
-				if err != nil {
-					resStr = fmt.Sprintf("%v", c.Result)
-				} else {
-					resStr = string(jsonBytes)
+				switch r := c.Result.(type) {
+				case json.RawMessage:
+					resStr = string(r)
+				case string:
+					resStr = r
+				case []byte:
+					resStr = string(r)
+				default:
+					// Marshal any other type to JSON for proper formatting
+					jsonBytes, err := json.Marshal(c.Result)
+					if err != nil {
+						resStr = fmt.Sprintf("%v", c.Result)
+					} else {
+						resStr = string(jsonBytes)
+					}
 				}
 			}
 			content = append(content, anthropic.NewToolResultBlock(c.CallID, resStr, c.Error != nil))
