@@ -39,7 +39,7 @@ type chatClient struct {
 
 type chatCompletionNewParamsOpt openai.ChatCompletionNewParams
 
-func (o chatCompletionNewParamsOpt) Value() any {
+func (o chatCompletionNewParamsOpt) MAFValue() any {
 	return openai.ChatCompletionNewParams(o)
 }
 
@@ -400,7 +400,17 @@ func buildMessageParam(msg *message.Message) ([]openai.ChatCompletionMessagePara
 						},
 					})
 				default:
-					// For other URI content types, just ignore, they are not supported yet.
+					// A data: URI carries the bytes inline, so audio/PDF (and other
+					// non-image) content can be mapped to input_audio/file exactly like
+					// DataContent. Non-data http(s) audio/file URLs have no
+					// chat-completions mapping, so they are still dropped.
+					if data, ok := dataURIPayload(c.URI); ok {
+						contents = append(contents, dataContentPart(&message.DataContent{
+							ContentHeader: c.ContentHeader,
+							MediaType:     c.MediaType,
+							Data:          data,
+						}))
+					}
 				}
 			case *message.DataContent:
 				switch c.TopLevelMediaType() {
@@ -430,7 +440,7 @@ func buildMessageParam(msg *message.Message) ([]openai.ChatCompletionMessagePara
 					}))
 				default:
 					contents = append(contents, openai.FileContentPart(openai.ChatCompletionContentPartFileFileParam{
-						FileData: openai.String(c.Data),
+						FileData: openai.String(c.URI()),
 						Filename: openai.String(c.Name),
 					}))
 				}
@@ -509,10 +519,8 @@ func buildMessageParam(msg *message.Message) ([]openai.ChatCompletionMessagePara
 				ret := funcResult.Result
 				if funcResult.Error != nil {
 					ret = funcResult.Error
-				} else if b, ok := ret.(json.RawMessage); ok {
-					ret = string(b)
 				}
-				messages = append(messages, openai.ToolMessage(fmt.Sprintf("%v", ret), funcResult.CallID))
+				messages = append(messages, openai.ToolMessage(toolResultText(ret), funcResult.CallID))
 			}
 		}
 		return messages, nil
@@ -545,6 +553,29 @@ func sanitizeAuthorName(name string) string {
 		}
 	}
 	return b.String()
+}
+
+// toolResultText renders a function-tool result for the OpenAI wire format. A
+// non-string, non-raw result (e.g. a struct or map returned by a typed
+// functool) is JSON-encoded rather than rendered with Go's %v, which would send
+// an unparseable Go representation like "{Paris 20}" to the model.
+func toolResultText(ret any) string {
+	switch v := ret.(type) {
+	case nil:
+		return ""
+	case string:
+		return v
+	case json.RawMessage:
+		return string(v)
+	case []byte:
+		return string(v)
+	case error:
+		return v.Error()
+	}
+	if b, err := json.Marshal(ret); err == nil {
+		return string(b)
+	}
+	return fmt.Sprintf("%v", ret)
 }
 
 // populateChatAnnotations maps Chat Completions message annotations (e.g. the
@@ -608,4 +639,56 @@ func imageFileID(props map[string]any) string {
 		}
 	}
 	return ""
+}
+
+// dataContentPart maps in-memory content to the matching chat completions
+// content part: images become an image URL, audio becomes input_audio, and
+// everything else becomes a file. It is shared by the DataContent and the
+// data: URIContent branches so both stay symmetric, matching the Python SDK.
+func dataContentPart(c *message.DataContent) openai.ChatCompletionContentPartUnionParam {
+	switch c.TopLevelMediaType() {
+	case "image":
+		return openai.ChatCompletionContentPartUnionParam{
+			OfImageURL: &openai.ChatCompletionContentPartImageParam{
+				ImageURL: openai.ChatCompletionContentPartImageImageURLParam{
+					URL:    c.URI(),
+					Detail: imageDetail(c.AdditionalProperties),
+				},
+			},
+		}
+	case "audio":
+		var format string
+		switch c.MediaType {
+		case "audio/wav":
+			format = "wav"
+		case "audio/mp3", "audio/mpeg":
+			format = "mp3"
+		default:
+			// Default to mp3
+			format = "mp3"
+		}
+		return openai.InputAudioContentPart(openai.ChatCompletionContentPartInputAudioInputAudioParam{
+			Data:   c.Data,
+			Format: format,
+		})
+	default:
+		return openai.FileContentPart(openai.ChatCompletionContentPartFileFileParam{
+			FileData: openai.String(c.URI()),
+			Filename: openai.String(c.Name),
+		})
+	}
+}
+
+// dataURIPayload returns the base64-encoded payload of a data: URI, reporting
+// false for any other (e.g. http/https) URI. OpenAI chat completions cannot
+// accept audio or file content by URL, so only inline data: URIs are mappable.
+func dataURIPayload(uri string) (string, bool) {
+	if !strings.HasPrefix(strings.ToLower(uri), "data:") {
+		return "", false
+	}
+	_, data, ok := strings.Cut(uri, ",")
+	if !ok {
+		return "", false
+	}
+	return data, true
 }
