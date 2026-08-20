@@ -23,6 +23,7 @@ import (
 	"iter"
 	"reflect"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -63,6 +64,21 @@ type AgentConfig struct {
 	// [workflow.ErrorEvent]s in the agent response stream. When false, a
 	// generic message is emitted instead.
 	IncludeErrorDetails bool
+}
+
+func recordStreamedMessageID(streamed map[streamedMessageKey]struct{}, executorID string, messageID string) {
+	if strings.TrimSpace(messageID) == "" {
+		return
+	}
+	streamed[streamedMessageKey{executorID: executorID, messageID: messageID}] = struct{}{}
+}
+
+func messageWasStreamed(streamed map[streamedMessageKey]struct{}, executorID string, messageID string) bool {
+	if strings.TrimSpace(messageID) == "" {
+		return false
+	}
+	_, ok := streamed[streamedMessageKey{executorID: executorID, messageID: messageID}]
+	return ok
 }
 
 // NewAgent wraps a [*workflow.Workflow] as an [*agent.Agent].
@@ -125,6 +141,7 @@ func NewAgent(wf *workflow.Workflow, cfg AgentConfig) (*agent.Agent, error) {
 			responseID := uuid.NewString()
 			stream, _ := agent.GetOption(options, agent.Stream)
 			mergeState := newCollectedResponseMergeState()
+			streamedMessageIDs := make(map[streamedMessageKey]struct{})
 			emitUpdate := func(update *agent.ResponseUpdate, terminalWorkflowOutput bool) bool {
 				if update == nil {
 					return true
@@ -205,7 +222,9 @@ func NewAgent(wf *workflow.Workflow, cfg AgentConfig) (*agent.Agent, error) {
 				case workflow.OutputEvent:
 					switch out := e.Output.(type) {
 					case *agent.ResponseUpdate:
-						if !emitUpdate(stampUpdate(out, responseID, e), false) {
+						stamped := stampUpdate(out, responseID, e)
+						recordStreamedMessageID(streamedMessageIDs, e.ExecutorID, stamped.MessageID)
+						if !emitUpdate(stamped, false) {
 							return
 						}
 					case *agent.Response:
@@ -215,8 +234,20 @@ func NewAgent(wf *workflow.Workflow, cfg AgentConfig) (*agent.Agent, error) {
 						if out == nil {
 							continue
 						}
+						emittedMessage := false
+						suppressedStreamedMessage := false
 						for _, msg := range out.Messages {
+							if msg != nil && messageWasStreamed(streamedMessageIDs, e.ExecutorID, msg.ID) {
+								suppressedStreamedMessage = true
+								continue
+							}
+							emittedMessage = true
 							if !emitUpdate(messageToUpdate(msg, responseID, e), false) {
+								return
+							}
+						}
+						if !emittedMessage && suppressedStreamedMessage {
+							if !emitUpdate(newUpdate(responseID, e), false) {
 								return
 							}
 						}
@@ -304,6 +335,11 @@ func createSession(_ context.Context, sess *agent.Session, _ ...agent.Option) er
 type matchedExternalResponse struct {
 	contentID string
 	response  *workflow.ExternalResponse
+}
+
+type streamedMessageKey struct {
+	executorID string
+	messageID  string
 }
 
 // splitResponses scans messages for response content matching pending
