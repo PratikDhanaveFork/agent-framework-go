@@ -352,6 +352,69 @@ func TestListToolsPreservesMCPToolMetadata(t *testing.T) {
 	}
 }
 
+func TestListToolsNormalizesInvalidToolName(t *testing.T) {
+	ctx := context.Background()
+	server := mcp.NewServer(&mcp.Implementation{Name: "test-server", Version: "1.0.0"}, nil)
+	const remoteName = "search files/v2:beta"
+	var called bool
+	server.AddTool(&mcp.Tool{
+		Name:        remoteName,
+		Description: "tool with an invalid provider name",
+		InputSchema: map[string]any{"type": "object"},
+	}, func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		called = true
+		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "ok"}}}, nil
+	})
+
+	session := connectInMemory(t, ctx, server)
+	tools, err := mcptool.ListTools(ctx, session)
+	if err != nil {
+		t.Fatalf("ListTools() error = %v", err)
+	}
+	if len(tools) != 1 {
+		t.Fatalf("expected one tool, got %d", len(tools))
+	}
+	funcTool, ok := tools[0].(tool.FuncTool)
+	if !ok {
+		t.Fatalf("listed tool is %T, want tool.FuncTool", tools[0])
+	}
+	// Name() must be normalized to the provider-safe pattern.
+	if got, want := funcTool.Name(), "search-files-v2-beta"; got != want {
+		t.Fatalf("Name() = %q, want %q", got, want)
+	}
+	// Call() must still invoke the server under the original remote name.
+	if _, err := funcTool.Call(ctx, `{}`); err != nil {
+		t.Fatalf("Call() error = %v", err)
+	}
+	if !called {
+		t.Fatalf("server tool %q was not invoked with the original remote name", remoteName)
+	}
+}
+
+func TestListToolsRejectsNormalizedNameCollision(t *testing.T) {
+	ctx := context.Background()
+	server := mcp.NewServer(&mcp.Implementation{Name: "test-server", Version: "1.0.0"}, nil)
+	// "search a" and "search/a" both normalize to "search-a".
+	for _, remoteName := range []string{"search a", "search/a"} {
+		server.AddTool(&mcp.Tool{
+			Name:        remoteName,
+			Description: "collision tool",
+			InputSchema: map[string]any{"type": "object"},
+		}, func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			return &mcp.CallToolResult{}, nil
+		})
+	}
+
+	session := connectInMemory(t, ctx, server)
+	tools, err := mcptool.ListTools(ctx, session)
+	if err == nil {
+		t.Fatalf("ListTools() error = nil, want collision error; got %d tools", len(tools))
+	}
+	if !strings.Contains(err.Error(), "search-a") {
+		t.Fatalf("ListTools() error = %v, want it to mention the colliding normalized name", err)
+	}
+}
+
 func TestCallForwardsArgumentsToMCPTool(t *testing.T) {
 	ctx := context.Background()
 	server := mcp.NewServer(&mcp.Implementation{Name: "test-server", Version: "1.0.0"}, nil)
@@ -1059,83 +1122,6 @@ func (s *stubSamplingChatClient) GetResponse(_ context.Context, messages []*mess
 		s.gotTexts = append(s.gotTexts, m.Contents.Text())
 	}
 	return &message.Message{Role: message.RoleAssistant, Contents: message.Contents{s.reply}}, nil
-}
-
-// A server-initiated sampling request must be denied when the caller wired no
-// approval callback, mirroring the Python client's deny-by-default policy: the
-// host model is never borrowed silently.
-func TestConnectSamplingDeniesByDefault(t *testing.T) {
-	ctx := context.Background()
-	server := mcp.NewServer(&mcp.Implementation{Name: "test-server", Version: "1.0.0"}, nil)
-	stub := &stubSamplingChatClient{reply: &message.TextContent{Text: "should not be used"}}
-	_, serverSession := connectInMemoryWithOptions(t, ctx, server, mcptool.WithSampling(stub, nil, 0))
-
-	_, err := serverSession.CreateMessage(ctx, &mcp.CreateMessageParams{
-		MaxTokens: 100,
-		Messages: []*mcp.SamplingMessage{
-			{Role: "user", Content: &mcp.TextContent{Text: "hi"}},
-		},
-	})
-	if err == nil {
-		t.Fatal("CreateMessage() error = nil, want deny error")
-	}
-	if stub.called {
-		t.Fatal("chat client was invoked despite deny-by-default")
-	}
-}
-
-// With an approving callback the request is serviced by the host chat client:
-// the server-requested budget is clamped, the conversation (including the
-// system prompt) is translated, and the reply is returned as an assistant
-// message with an endTurn stop reason.
-func TestConnectSamplingApproveInvokesChatClient(t *testing.T) {
-	ctx := context.Background()
-	server := mcp.NewServer(&mcp.Implementation{Name: "test-server", Version: "1.0.0"}, nil)
-	stub := &stubSamplingChatClient{reply: &message.TextContent{Text: "host reply"}}
-	approve := func(context.Context, *mcp.CreateMessageParams) (bool, error) { return true, nil }
-	_, serverSession := connectInMemoryWithOptions(t, ctx, server, mcptool.WithSampling(stub, approve, 64))
-
-	result, err := serverSession.CreateMessage(ctx, &mcp.CreateMessageParams{
-		MaxTokens:    1000,
-		SystemPrompt: "be terse",
-		Messages: []*mcp.SamplingMessage{
-			{Role: "user", Content: &mcp.TextContent{Text: "hi"}},
-		},
-	})
-	if err != nil {
-		t.Fatalf("CreateMessage() error = %v", err)
-	}
-	if !stub.called {
-		t.Fatal("chat client was not invoked")
-	}
-	if stub.gotMax != 64 {
-		t.Fatalf("clamped maxTokens = %d, want 64", stub.gotMax)
-	}
-	wantRoles := []message.Role{message.RoleSystem, message.RoleUser}
-	if len(stub.gotRoles) != len(wantRoles) {
-		t.Fatalf("translated roles = %v, want %v", stub.gotRoles, wantRoles)
-	}
-	for i, want := range wantRoles {
-		if stub.gotRoles[i] != want {
-			t.Fatalf("translated role[%d] = %q, want %q", i, stub.gotRoles[i], want)
-		}
-	}
-	if stub.gotTexts[0] != "be terse" || stub.gotTexts[1] != "hi" {
-		t.Fatalf("translated texts = %v, want system prompt then user message", stub.gotTexts)
-	}
-	text, ok := result.Content.(*mcp.TextContent)
-	if !ok {
-		t.Fatalf("result content is %T, want *mcp.TextContent", result.Content)
-	}
-	if text.Text != "host reply" {
-		t.Fatalf("result text = %q, want host reply", text.Text)
-	}
-	if result.Role != mcp.Role(message.RoleAssistant) {
-		t.Fatalf("result role = %q, want assistant", result.Role)
-	}
-	if result.StopReason != "endTurn" {
-		t.Fatalf("result stopReason = %q, want endTurn", result.StopReason)
-	}
 }
 
 // A server that adds a tool mid-session sends notifications/tools/list_changed;

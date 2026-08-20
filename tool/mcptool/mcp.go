@@ -1,6 +1,6 @@
 // Copyright (c) Microsoft. All rights reserved.
 
-// Package mcp provides integration with the Model Context Protocol (MCP).
+// Package mcptool provides integration with the Model Context Protocol (MCP).
 // It allows agents to connect to external MCP servers via stdio (subprocess)
 // or HTTP (SSE / streamable HTTP) and expose their tools as
 // tool.Tool / tool.FuncTool instances.
@@ -19,6 +19,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+// AddTool registers a tool.FuncTool on the given mcp.Server so it is exposed to MCP clients.
 func AddTool(src *mcp.Server, tl tool.FuncTool) {
 	src.AddTool(&mcp.Tool{
 		Name:         tl.Name(),
@@ -37,37 +38,9 @@ func AddTool(src *mcp.Server, tl tool.FuncTool) {
 }
 
 // ConnectOption configures the MCP client that Connect constructs. Options are
-// additive: with no options Connect behaves exactly as before, advertising no
-// sampling capability and ignoring server list-changed notifications.
+// additive: with no options Connect behaves exactly as before, ignoring
+// server list-changed notifications.
 type ConnectOption func(*mcp.ClientOptions)
-
-// SamplingChatClient produces the host model's reply to a server-initiated
-// sampling/createMessage request. It mirrors the Python client's
-// sampling_callback and the .NET sampling IChatClient: an MCP server may
-// delegate sub-reasoning to the host, which answers with the caller's model.
-type SamplingChatClient interface {
-	// GetResponse returns the assistant reply for the translated conversation.
-	// maxTokens is the clamped token budget for the reply (0 when unbounded).
-	GetResponse(ctx context.Context, messages []*message.Message, maxTokens int64) (*message.Message, error)
-}
-
-// SamplingApprover decides whether a server-initiated sampling request may run
-// against the host model. Returning false, an error, or supplying a nil
-// approver denies the request, mirroring the Python client's deny-by-default
-// policy for host-in-the-loop sampling.
-type SamplingApprover func(ctx context.Context, params *mcp.CreateMessageParams) (bool, error)
-
-// WithSampling advertises the sampling capability and services incoming
-// sampling/createMessage requests using client. Requests are denied unless
-// approve is non-nil and returns true. maxTokens, when positive, clamps the
-// server-requested token budget passed to the client.
-func WithSampling(client SamplingChatClient, approve SamplingApprover, maxTokens int64) ConnectOption {
-	return func(opts *mcp.ClientOptions) {
-		opts.CreateMessageHandler = func(ctx context.Context, req *mcp.CreateMessageRequest) (*mcp.CreateMessageResult, error) {
-			return handleSampling(ctx, client, approve, maxTokens, req.Params)
-		}
-	}
-}
 
 // WithToolListChanged invokes cb when the server sends
 // notifications/tools/list_changed, letting the caller re-run ListTools to
@@ -94,6 +67,7 @@ func WithPromptListChanged(cb func()) ConnectOption {
 	}
 }
 
+// Connect dials an MCP server over the given transport and returns a client session.
 func Connect(ctx context.Context, transport mcp.Transport, opts ...ConnectOption) (*mcp.ClientSession, error) {
 	clientOptions := &mcp.ClientOptions{}
 	for _, opt := range opts {
@@ -108,103 +82,30 @@ func Connect(ctx context.Context, transport mcp.Transport, opts ...ConnectOption
 	return client.Connect(ctx, transport, nil)
 }
 
-func handleSampling(ctx context.Context, client SamplingChatClient, approve SamplingApprover, maxTokens int64, params *mcp.CreateMessageParams) (*mcp.CreateMessageResult, error) {
-	if client == nil {
-		return nil, fmt.Errorf("mcp sampling: no chat client configured")
-	}
-	// Deny by default: a server may only borrow the host model when the caller
-	// has explicitly opted in via an approval callback (matches Python).
-	if approve == nil {
-		return nil, fmt.Errorf("mcp sampling: request denied (no approval callback configured)")
-	}
-	approved, err := approve(ctx, params)
-	if err != nil {
-		return nil, fmt.Errorf("mcp sampling: approval failed: %w", err)
-	}
-	if !approved {
-		return nil, fmt.Errorf("mcp sampling: request denied by approval callback")
-	}
-
-	requested := int64(0)
-	if params != nil {
-		requested = params.MaxTokens
-	}
-	reply, err := client.GetResponse(ctx, samplingMessagesToAgent(params), clampMaxTokens(requested, maxTokens))
-	if err != nil {
-		return nil, fmt.Errorf("mcp sampling: chat client failed: %w", err)
-	}
-
-	return &mcp.CreateMessageResult{
-		Role:       mcp.Role(message.RoleAssistant),
-		Content:    samplingReplyContent(reply),
-		StopReason: "endTurn",
-	}, nil
-}
-
-// clampMaxTokens limits the server-requested token budget to limit. A
-// non-positive limit leaves the request unbounded; a non-positive request
-// adopts the limit.
-func clampMaxTokens(requested, limit int64) int64 {
-	if limit <= 0 {
-		return requested
-	}
-	if requested <= 0 || requested > limit {
-		return limit
-	}
-	return requested
-}
-
-func samplingMessagesToAgent(params *mcp.CreateMessageParams) []*message.Message {
-	if params == nil {
-		return nil
-	}
-	messages := make([]*message.Message, 0, len(params.Messages)+1)
-	if params.SystemPrompt != "" {
-		messages = append(messages, &message.Message{
-			Role:     message.RoleSystem,
-			Contents: message.Contents{&message.TextContent{Text: params.SystemPrompt}},
-		})
-	}
-	for _, samplingMessage := range params.Messages {
-		if samplingMessage == nil {
-			continue
-		}
-		messages = append(messages, &message.Message{
-			Role:     samplingRoleToAgent(samplingMessage.Role),
-			Contents: mcpContentToAgentContent([]mcp.Content{samplingMessage.Content}),
-		})
-	}
-	return messages
-}
-
-func samplingRoleToAgent(role mcp.Role) message.Role {
-	if role == mcp.Role(message.RoleAssistant) {
-		return message.RoleAssistant
-	}
-	return message.RoleUser
-}
-
-func samplingReplyContent(reply *message.Message) mcp.Content {
-	if reply != nil {
-		for _, content := range reply.Contents {
-			if content != nil {
-				return agentContentToMCPContent(content)
-			}
-		}
-	}
-	return &mcp.TextContent{}
-}
-
+// ListTools enumerates the remote server's tools and wraps each as a tool.Tool.
 func ListTools(ctx context.Context, session *mcp.ClientSession) ([]tool.Tool, error) {
 	toolsResult, err := session.ListTools(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list tools: %w", err)
 	}
 
-	// Create agent.Tool instances for each MCP tool
+	// Create agent.Tool instances for each MCP tool.
+	//
+	// Normalization (normalizeMCPName) can map distinct remote names onto the
+	// same provider-safe name (e.g. "a b" and "a/b" both become "a-b"). Such a
+	// collision would break provider tool registration (duplicate function
+	// names) and cause the autocall tools map to silently drop all but the
+	// first tool. Detect it here and fail loudly so the caller gets a clear
+	// signal instead of missing/unreachable tools.
+	// Create tool.Tool instances for each MCP tool
 	result := make([]tool.Tool, 0, len(toolsResult.Tools))
+	seen := make(map[string]string, len(toolsResult.Tools))
 	for _, mcpTool := range toolsResult.Tools {
 		agentTool := newMCPToolWrapper(session, mcpTool)
+		if existing, ok := seen[agentTool.name]; ok {
+			return nil, fmt.Errorf("normalized MCP tool name collision: remote tools %q and %q both normalize to %q", existing, mcpTool.Name, agentTool.name)
+		}
+		seen[agentTool.name] = mcpTool.Name
 		result = append(result, agentTool)
 	}
 
@@ -557,21 +458,46 @@ var (
 	_ tool.FuncTool = (*mcpWrapper)(nil)
 )
 
-// mcpWrapper wraps an MCP tool as an agent.Tool.
+// mcpWrapper wraps an MCP tool as a tool.Tool.
 type mcpWrapper struct {
 	session *mcp.ClientSession
 	tool    *mcp.Tool
+	// name is the normalized tool name surfaced to providers and used as the
+	// autocall map key. tool.Name retains the original remote name used when
+	// invoking the MCP server.
+	name string
 }
 
 func newMCPToolWrapper(session *mcp.ClientSession, tool *mcp.Tool) *mcpWrapper {
 	return &mcpWrapper{
 		session: session,
 		tool:    tool,
+		name:    normalizeMCPName(tool.Name),
 	}
 }
 
+// normalizeMCPName replaces every rune that is not a valid function-name
+// character with a dash. Providers such as OpenAI reject tool names that do not
+// match the [A-Za-z0-9_.-] identifier pattern, but MCP server tool names may
+// contain arbitrary characters (spaces, slashes, colons). This mirrors the
+// Python SDK's _normalize_mcp_name so the same remote tool surfaces under the
+// same name across SDKs.
+func normalizeMCPName(name string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'A' && r <= 'Z',
+			r >= 'a' && r <= 'z',
+			r >= '0' && r <= '9',
+			r == '_', r == '.', r == '-':
+			return r
+		default:
+			return '-'
+		}
+	}, name)
+}
+
 func (w *mcpWrapper) Name() string {
-	return w.tool.Name
+	return w.name
 }
 
 func (w *mcpWrapper) Description() string {
