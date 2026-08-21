@@ -35,14 +35,6 @@ import (
 
 var messagesSliceType = reflect.TypeFor[[]*message.Message]()
 
-// TypeIDs of the request content types carried by external requests. They are
-// used to disambiguate restored (delayed-deserialized) requests, whose JSON
-// forms are cross-assignable (see requestDataContent).
-var (
-	functionCallContentTypeID        = workflow.NewTypeID(reflect.TypeFor[*message.FunctionCallContent]())
-	toolApprovalRequestContentTypeID = workflow.NewTypeID(reflect.TypeFor[*message.ToolApprovalRequestContent]())
-)
-
 const workflowErrorMessage = "An error occurred while executing the workflow."
 
 // AgentConfig configures a [workflow.Workflow] hosted as an [agent.Agent] via [NewAgent].
