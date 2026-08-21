@@ -108,12 +108,10 @@ func newMemoryProvider(client *azaiprojects.MemoryStoresClient, memoryStoreName 
 	if config.SearchInputFilter == nil {
 		config.SearchInputFilter = messagefilter.ExternalOnly
 	}
-	if config.StoreInputRequestFilter == nil {
-		config.StoreInputRequestFilter = messagefilter.ExternalOnly
-	}
-	if config.StoreInputResponseFilter == nil {
-		config.StoreInputResponseFilter = messagefilter.PassThrough
-	}
+	// StoreInputRequestFilter and StoreInputResponseFilter are intentionally left
+	// nil when unset: ContextProviderConfig already defaults a nil store request
+	// filter to messagefilter.ExternalOnly and a nil store response filter to
+	// messagefilter.PassThrough, so re-setting them here would be redundant.
 	providerConfig := agent.ContextProviderConfig{
 		ProvideInputMessageFilter:       config.SearchInputFilter,
 		SourceID:                        defaultSourceID,
