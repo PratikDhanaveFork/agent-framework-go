@@ -59,7 +59,8 @@ func NewResponsesAgent(oclient openai.Client, config AgentConfig) *agent.Agent {
 			Middlewares:  providerMiddlewares,
 			Format:       c.formatOf,
 			Unmarshal:    c.unmarshal,
-		}, config.Config)
+		}, config.Config,
+	)
 }
 
 type responsesClient struct {
