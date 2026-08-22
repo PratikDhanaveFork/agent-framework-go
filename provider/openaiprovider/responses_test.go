@@ -4,6 +4,7 @@ package openaiprovider_test
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -3144,9 +3145,9 @@ data: {"type":"response.completed","response":{"id":"resp_002","object":"respons
 	a := newTestResponsesClient(server, "gpt-4o-mini")
 
 	var updates []*agent.ResponseUpdate
-	var allText strings.Builder
-	for update, err := range a.RunText(
-		t.Context(), "Calculate 3+3", agent.Stream(true),
+	var codeCall *message.CodeInterpreterToolCallContent
+	var codeResult *message.CodeInterpreterToolResultContent
+	for update, err := range a.RunText(t.Context(), "Calculate 3+3", agent.Stream(true),
 		agent.WithTool(&hostedtool.CodeInterpreter{}),
 	) {
 		if err != nil {
@@ -3154,8 +3155,11 @@ data: {"type":"response.completed","response":{"id":"resp_002","object":"respons
 		}
 		updates = append(updates, update)
 		for _, content := range update.Contents {
-			if tc, ok := content.(*message.TextContent); ok {
-				allText.WriteString(tc.Text)
+			switch c := content.(type) {
+			case *message.CodeInterpreterToolCallContent:
+				codeCall = c
+			case *message.CodeInterpreterToolResultContent:
+				codeResult = c
 			}
 		}
 	}
@@ -3164,22 +3168,52 @@ data: {"type":"response.completed","response":{"id":"resp_002","object":"respons
 		t.Errorf("expected at least 3 updates, got %d", len(updates))
 	}
 
-	// Verify we got both code interpreter content and text result
-	responseText := allText.String()
-	if !strings.Contains(responseText, "Code Interpreter") {
-		t.Errorf("expected response to contain 'Code Interpreter', got %q", responseText)
+	// Streaming must emit structured code-interpreter content, matching the
+	// non-streaming path and the .NET/Python SDKs, rather than a text blob.
+	if codeCall == nil {
+		t.Fatalf("expected a CodeInterpreterToolCallContent in the streamed updates")
 	}
-	if !strings.Contains(responseText, "print(3+3)") {
-		t.Errorf("expected response to contain code 'print(3+3)', got %q", responseText)
+	if codeCall.CallID != "call_code_002" {
+		t.Errorf("expected call CallID 'call_code_002', got %q", codeCall.CallID)
 	}
-	// Assert on the Code Interpreter output section specifically so this test verifies
-	// that streamed code_interpreter_call.outputs (enabled by the include) are surfaced,
-	// rather than being satisfied by the assistant message's output_text "6".
-	if !strings.Contains(responseText, "[Output]") {
-		t.Errorf("expected response to contain '[Output]' section from code interpreter outputs, got %q", responseText)
+	if len(codeCall.Inputs) != 1 {
+		t.Fatalf("expected 1 input in code call, got %d", len(codeCall.Inputs))
 	}
-	if !strings.Contains(responseText, "Image: https://example.com/plot.png") {
-		t.Errorf("expected response to contain the code interpreter image URL, got %q", responseText)
+	dataContent, ok := codeCall.Inputs[0].(*message.DataContent)
+	if !ok {
+		t.Fatalf("expected input to be DataContent, got %T", codeCall.Inputs[0])
+	}
+	if dataContent.MediaType != "text/x-python" {
+		t.Errorf("expected MediaType text/x-python, got %s", dataContent.MediaType)
+	}
+	if decoded, err := base64.StdEncoding.DecodeString(dataContent.Data); err != nil {
+		t.Errorf("expected base64-encoded code, decode error: %v", err)
+	} else if string(decoded) != "print(3+3)" {
+		t.Errorf("expected decoded code 'print(3+3)', got %q", string(decoded))
+	}
+
+	if codeResult == nil {
+		t.Fatalf("expected a CodeInterpreterToolResultContent in the streamed updates")
+	}
+	if codeResult.CallID != codeCall.CallID {
+		t.Errorf("expected result CallID to match call CallID, got %s vs %s", codeResult.CallID, codeCall.CallID)
+	}
+	if len(codeResult.Outputs) != 2 {
+		t.Fatalf("expected 2 outputs (logs + image), got %d", len(codeResult.Outputs))
+	}
+	logs, ok := codeResult.Outputs[0].(*message.TextContent)
+	if !ok {
+		t.Fatalf("expected first output to be TextContent, got %T", codeResult.Outputs[0])
+	}
+	if logs.Text != "6\n" {
+		t.Errorf("expected logs '6\\n', got %q", logs.Text)
+	}
+	img, ok := codeResult.Outputs[1].(*message.URIContent)
+	if !ok {
+		t.Fatalf("expected second output to be URIContent, got %T", codeResult.Outputs[1])
+	}
+	if img.URI != "https://example.com/plot.png" {
+		t.Errorf("expected image URI 'https://example.com/plot.png', got %q", img.URI)
 	}
 }
 
@@ -6838,6 +6872,91 @@ func responsesBodyEqual(t *testing.T, got string, want string) {
 			t.Fatalf("failed marshaling wantObj: %v", err)
 		}
 		t.Errorf("body\ngot %s\nwant %s", gotOut, wantOut)
+	}
+}
+
+// TestResponsesStreamingFailedResponseSurfacesError verifies that a streamed
+// response.failed event surfaces its error as ErrorContent rather than an
+// empty update.
+func TestResponsesStreamingFailedResponseSurfacesError(t *testing.T) {
+	const input = `
+            {
+                "model":"gpt-4o-mini",
+                "input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"test"}]}],
+                "stream":true
+            }
+            `
+	const output = `event: response.created
+data: {"type":"response.created","response":{"id":"resp_001","object":"response","created_at":1741892091,"status":"in_progress","model":"gpt-4o-mini","output":[]}}
+
+event: response.failed
+data: {"type":"response.failed","response":{"id":"resp_001","object":"response","created_at":1741892091,"status":"failed","model":"gpt-4o-mini","output":[],"error":{"code":"server_error","message":"Internal error"}}}
+
+`
+	server := newTestResponsesServerStreaming(t, input, output)
+	defer server.Close()
+	a := newTestResponsesClient(server, "gpt-4o-mini")
+
+	var errContent *message.ErrorContent
+	for update, err := range a.RunText(t.Context(), "test", agent.Stream(true)) {
+		if err != nil {
+			t.Fatalf("error = %v", err)
+		}
+		for _, c := range update.Contents {
+			if ec, ok := c.(*message.ErrorContent); ok {
+				errContent = ec
+			}
+		}
+	}
+	if errContent == nil {
+		t.Fatal("expected an ErrorContent for the failed response, got none")
+	}
+	if errContent.Message != "Internal error" {
+		t.Errorf("error message = %q, want %q", errContent.Message, "Internal error")
+	}
+	if errContent.ErrorCode != "server_error" {
+		t.Errorf("error code = %q, want %q", errContent.ErrorCode, "server_error")
+	}
+}
+
+// TestResponsesStreamingFailedResponseSurfacesCodeOnlyError guards the case where a
+// failed response carries an error code but no message. The failure must still be
+// surfaced as ErrorContent rather than collapsing into an empty update.
+func TestResponsesStreamingFailedResponseSurfacesCodeOnlyError(t *testing.T) {
+	const input = `
+            {
+                "model":"gpt-4o-mini",
+                "input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"test"}]}],
+                "stream":true
+            }
+            `
+	const output = `event: response.created
+data: {"type":"response.created","response":{"id":"resp_001","object":"response","created_at":1741892091,"status":"in_progress","model":"gpt-4o-mini","output":[]}}
+
+event: response.failed
+data: {"type":"response.failed","response":{"id":"resp_001","object":"response","created_at":1741892091,"status":"failed","model":"gpt-4o-mini","output":[],"error":{"code":"server_error"}}}
+
+`
+	server := newTestResponsesServerStreaming(t, input, output)
+	defer server.Close()
+	a := newTestResponsesClient(server, "gpt-4o-mini")
+
+	var errContent *message.ErrorContent
+	for update, err := range a.RunText(t.Context(), "test", agent.Stream(true)) {
+		if err != nil {
+			t.Fatalf("error = %v", err)
+		}
+		for _, c := range update.Contents {
+			if ec, ok := c.(*message.ErrorContent); ok {
+				errContent = ec
+			}
+		}
+	}
+	if errContent == nil {
+		t.Fatal("expected an ErrorContent for the code-only failed response, got none")
+	}
+	if errContent.ErrorCode != "server_error" {
+		t.Errorf("error code = %q, want %q", errContent.ErrorCode, "server_error")
 	}
 }
 

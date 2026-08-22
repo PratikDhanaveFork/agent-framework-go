@@ -346,19 +346,30 @@ func (host *groupChatHostExecutor) handleTurn(ctx *workflow.Context, token workf
 		}
 	}
 
-	nextAgent, err := manager.SelectNextAgent(ctx, host.history)
+	dispatched, err := host.dispatchNextAgent(ctx, token, manager)
 	if err != nil {
 		return err
 	}
+	if dispatched {
+		return nil
+	}
+	return host.complete(ctx)
+}
+
+func (host *groupChatHostExecutor) dispatchNextAgent(ctx *workflow.Context, token workflow.TurnToken, manager *GroupChatManager) (bool, error) {
+	nextAgent, err := manager.SelectNextAgent(ctx, host.history)
+	if err != nil {
+		return false, err
+	}
 	if nextAgent == nil {
-		return host.complete(ctx)
+		return false, nil
 	}
 	nextBinding, ok := host.bindingForAgent(nextAgent)
 	if !ok {
 		// Selecting an agent that is not a participant ends the chat and
 		// yields the accumulated conversation, matching .NET GroupChatHost
 		// falling through to CompleteAsync on a lookup miss.
-		return host.complete(ctx)
+		return false, nil
 	}
 
 	// When the manager reselects the agent that just spoke, terminate by
@@ -368,12 +379,12 @@ func (host *groupChatHostExecutor) handleTurn(ctx *workflow.Context, token workf
 	// TakeTurnAsync guard (string.Equals(executor.Id, _currentSpeakerExecutorId)
 	// -> CompleteAsync). The empty-string initial value never fires on turn one.
 	if host.currentSpeakerExecutorID != "" && nextBinding.ID == host.currentSpeakerExecutorID {
-		return host.complete(ctx)
+		return false, host.complete(ctx)
 	}
 
 	host.iterationCount++
 	host.currentSpeakerExecutorID = nextBinding.ID
-	return ctx.SendMessage(nextBinding.ID, token)
+	return true, ctx.SendMessage(nextBinding.ID, token)
 }
 
 func (host *groupChatHostExecutor) shouldTerminate(ctx context.Context, manager *GroupChatManager) (bool, error) {
