@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/microsoft/agent-framework-go/agent"
 	"github.com/microsoft/agent-framework-go/agent/format/jsonformat"
 	"github.com/microsoft/agent-framework-go/agent/harness/toolautocall"
@@ -518,6 +519,14 @@ func buildResponsePart(part *genai.Part, contents []message.Content) ([]message.
 		if err != nil {
 			return nil, fmt.Errorf("geminiprovider: failed to marshal function call arguments: %w", err)
 		}
+		// Standard Gemini generateContent responses leave the function call ID empty
+		// (genai marks it omitempty). Synthesize a stable ID so the framework tool loop
+		// can correlate the call with its result on subsequent turns, mirroring Python's
+		// _generate_tool_call_id.
+		callID := part.FunctionCall.ID
+		if callID == "" {
+			callID = "tool-call-" + strings.ReplaceAll(uuid.NewString(), "-", "")
+		}
 		// Gemini 3 attaches the opaque thought_signature to the same part that
 		// carries the function call (Thought is false, Text is empty). Capture it
 		// as a preceding TextReasoningContent so buildRequestParts can replay it
@@ -533,7 +542,7 @@ func buildResponsePart(part *genai.Part, contents []message.Content) ([]message.
 			})
 		}
 		contents = append(contents, &message.FunctionCallContent{
-			CallID:    part.FunctionCall.ID,
+			CallID:    callID,
 			Name:      part.FunctionCall.Name,
 			Arguments: string(argsJSON),
 			ContentHeader: message.ContentHeader{
@@ -663,5 +672,6 @@ func toUsageDetails(u *genai.GenerateContentResponseUsageMetadata) message.Usage
 		OutputTokenCount:      int64(u.CandidatesTokenCount),
 		TotalTokenCount:       int64(u.TotalTokenCount),
 		CachedInputTokenCount: int64(u.CachedContentTokenCount),
+		ReasoningTokenCount:   int64(u.ThoughtsTokenCount),
 	}
 }
