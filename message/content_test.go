@@ -3,6 +3,7 @@
 package message_test
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -273,6 +274,29 @@ func TestFunctionResultContent_ErrorNotSerialized(t *testing.T) {
 	}
 	if decoded.Error != nil {
 		t.Fatalf("Error must be nil after unmarshal, got %v", decoded.Error)
+	}
+}
+
+func TestContentEncoding_PreservesAdditionalProperties(t *testing.T) {
+	original := &message.TextContent{
+		ContentHeader: message.ContentHeader{
+			AdditionalProperties: map[string]any{"provider": "openai", "region": "eastus"},
+		},
+		Text: "sample text",
+	}
+	data, err := json.Marshal(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(data, []byte("AdditionalProperties")) {
+		t.Fatalf("marshaled JSON does not contain AdditionalProperties: %s", data)
+	}
+	var decoded message.TextContent
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(original.AdditionalProperties, decoded.AdditionalProperties) {
+		t.Fatalf("AdditionalProperties = %v, want %v", decoded.AdditionalProperties, original.AdditionalProperties)
 	}
 }
 
