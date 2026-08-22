@@ -388,6 +388,7 @@ func TestChatBasicRequestResponse_Streaming(t *testing.T) {
                 "messages":[{"role":"user","content":"hello"}],
                 "model":"gpt-4o-mini",
                 "stream":true,
+                "stream_options":{"include_usage":true},
                 "max_completion_tokens":20
             }
             `
@@ -474,7 +475,8 @@ func TestChatStreamingRefusal_SurfacesErrorContent(t *testing.T) {
             {
                 "messages":[{"role":"user","content":"do something disallowed"}],
                 "model":"gpt-4o-mini",
-                "stream":true
+                "stream":true,
+                "stream_options":{"include_usage":true}
             }
             `
 	const output = `data: {"id":"chatcmpl-refusal01","object":"chat.completion.chunk","created":1727889370,"model":"gpt-4o-mini-2024-07-18","choices":[{"index":0,"delta":{"role":"assistant","refusal":"I'm sorry, I can't "},"finish_reason":null}],"usage":null}
@@ -507,6 +509,41 @@ data: [DONE]
 	}
 	if refusal.Message != "I'm sorry, I can't help with that." {
 		t.Errorf("refusal message = %q, want full accumulated refusal", refusal.Message)
+	}
+}
+
+// TestChatStreamingIncludeUsage_RespectsCallerOverride verifies that when the
+// caller explicitly sets stream_options.include_usage the provider does not
+// override it with the default true value.
+func TestChatStreamingIncludeUsage_RespectsCallerOverride(t *testing.T) {
+	const input = `
+            {
+                "messages":[{"role":"user","content":"hello"}],
+                "model":"gpt-4o-mini",
+                "stream":true,
+                "stream_options":{"include_usage":false}
+            }
+            `
+	const output = `data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1727889370,"model":"gpt-4o-mini-2024-07-18","choices":[{"index":0,"delta":{"role":"assistant","content":"Hi"},"logprobs":null,"finish_reason":null}]}
+
+data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1727889370,"model":"gpt-4o-mini-2024-07-18","choices":[{"index":0,"delta":{},"logprobs":null,"finish_reason":"stop"}]}
+
+data: [DONE]
+
+`
+	server := newTestServerStreaming(t, input, output)
+	defer server.Close()
+
+	a := newTestClient(server)
+
+	for _, err := range a.RunText(t.Context(), "hello", openaiprovider.ChatCompletionNewParams(openai.ChatCompletionNewParams{
+		StreamOptions: openai.ChatCompletionStreamOptionsParam{
+			IncludeUsage: openai.Bool(false),
+		},
+	}), agent.Stream(true)) {
+		if err != nil {
+			t.Fatalf("error = %v", err)
+		}
 	}
 }
 
@@ -990,7 +1027,8 @@ func TestChatFunctionCallContent_Streaming(t *testing.T) {
                     }
                 ],
                 "model": "gpt-4o-mini",
-                "stream": true
+                "stream": true,
+                "stream_options": {"include_usage": true}
             }
             `
 	const output = `data: {"id":"chatcmpl-ADymNiWWeqCJqHNFXiI1QtRcLuXcl","object":"chat.completion.chunk","created":1727895263,"model":"gpt-4o-mini-2024-07-18","system_fingerprint":"fp_f85bea6784","choices":[{"index":0,"delta":{"role":"assistant","content":null,"tool_calls":[{"index":0,"id":"call_F9ZaqPWo69u0urxAhVt8meDW","type":"function","function":{"name":"GetPersonAge","arguments":""}}],"refusal":null},"logprobs":null,"finish_reason":null}],"usage":null}
@@ -1278,6 +1316,7 @@ func TestChatOptions_Model_OverridesClientModel_Streaming(t *testing.T) {
                 "messages":[{"role":"user","content":"hello"}],
                 "model":"gpt-4o",
                 "stream":true,
+                "stream_options":{"include_usage":true},
                 "max_completion_tokens":20
             }
             `
@@ -1933,6 +1972,117 @@ func TestChatEmptyChoices_NonStreaming(t *testing.T) {
 	}
 	if usage := resp.Usage(); usage.InputTokenCount != 12 || usage.TotalTokenCount != 12 {
 		t.Errorf("expected usage input=12 total=12 to be surfaced, got %+v", usage)
+	}
+}
+
+func TestChatAuthorNamePropagation_NonStreaming(t *testing.T) {
+	const input = `
+            {
+                "messages": [
+                    {"role": "system", "content": "You are helpful.", "name": "AgentOne"},
+                    {"role": "user", "content": "hi", "name": "AgentOne"},
+                    {"role": "assistant", "content": "hello", "name": "AgentOne"}
+                ],
+                "model": "gpt-4o-mini"
+            }
+            `
+	const output = `
+            {
+              "id": "chatcmpl-author",
+              "object": "chat.completion",
+              "created": 1727894187,
+              "model": "gpt-4o-mini",
+              "choices": [
+                {"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}
+              ]
+            }
+            `
+	server := newTestServer(t, input, output)
+	defer server.Close()
+
+	a := newTestClient(server)
+
+	messages := []*message.Message{
+		{Role: message.RoleSystem, AuthorName: "Agent One", Contents: []message.Content{&message.TextContent{Text: "You are helpful."}}},
+		{Role: message.RoleUser, AuthorName: "Agent One", Contents: []message.Content{&message.TextContent{Text: "hi"}}},
+		{Role: message.RoleAssistant, AuthorName: "Agent One", Contents: []message.Content{&message.TextContent{Text: "hello"}}},
+	}
+	if _, err := a.Run(t.Context(), messages).Collect(); err != nil {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestChatAuthorNameSanitizationAndTruncation_NonStreaming(t *testing.T) {
+	// Disallowed characters are stripped and the result is capped at 64 runes.
+	const input = `
+            {
+                "messages": [
+                    {"role": "user", "content": "hi", "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+                ],
+                "model": "gpt-4o-mini"
+            }
+            `
+	const output = `
+            {
+              "id": "chatcmpl-author",
+              "object": "chat.completion",
+              "created": 1727894187,
+              "model": "gpt-4o-mini",
+              "choices": [
+                {"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}
+              ]
+            }
+            `
+	server := newTestServer(t, input, output)
+	defer server.Close()
+
+	a := newTestClient(server)
+
+	// "!" is stripped, then 70 alphanumerics are truncated to 64.
+	authorName := "!" + strings.Repeat("a", 70)
+	messages := []*message.Message{
+		{Role: message.RoleUser, AuthorName: authorName, Contents: []message.Content{&message.TextContent{Text: "hi"}}},
+	}
+	if _, err := a.Run(t.Context(), messages).Collect(); err != nil {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestChatAuthorNameEmpty_NonStreaming(t *testing.T) {
+	// Empty or whitespace-only author names leave the name field unset.
+	const input = `
+            {
+                "messages": [
+                    {"role": "system", "content": "You are helpful."},
+                    {"role": "user", "content": "hi"},
+                    {"role": "assistant", "content": "hello"}
+                ],
+                "model": "gpt-4o-mini"
+            }
+            `
+	const output = `
+            {
+              "id": "chatcmpl-author",
+              "object": "chat.completion",
+              "created": 1727894187,
+              "model": "gpt-4o-mini",
+              "choices": [
+                {"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}
+              ]
+            }
+            `
+	server := newTestServer(t, input, output)
+	defer server.Close()
+
+	a := newTestClient(server)
+
+	messages := []*message.Message{
+		{Role: message.RoleSystem, AuthorName: "", Contents: []message.Content{&message.TextContent{Text: "You are helpful."}}},
+		{Role: message.RoleUser, AuthorName: "   ", Contents: []message.Content{&message.TextContent{Text: "hi"}}},
+		{Role: message.RoleAssistant, AuthorName: "  ", Contents: []message.Content{&message.TextContent{Text: "hello"}}},
+	}
+	if _, err := a.Run(t.Context(), messages).Collect(); err != nil {
+		t.Fatalf("error = %v", err)
 	}
 }
 
