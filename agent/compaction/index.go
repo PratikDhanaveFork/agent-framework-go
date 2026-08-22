@@ -305,16 +305,6 @@ func (index *MessageIndex) IncludedNonSystemGroupCount() int {
 	return total
 }
 
-func (index *MessageIndex) includedNonSystemGroupIndices() []int {
-	var indices []int
-	for i, group := range index.Groups {
-		if group.isIncludedNonSystem() {
-			indices = append(indices, i)
-		}
-	}
-	return indices
-}
-
 // RawMessageCount returns the number of original messages represented by the index.
 //
 // Summary groups are excluded from this count because they are generated during compaction.
