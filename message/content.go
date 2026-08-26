@@ -165,6 +165,12 @@ type serializedDataContent struct {
 }
 
 func (t *DataContent) MarshalJSON() ([]byte, error) {
+	if !isValidMediaType(t.MediaType) {
+		return nil, fmt.Errorf("invalid media type: %s", t.MediaType)
+	}
+	if !isValidBase64Data(t.Data) {
+		return nil, fmt.Errorf("invalid base64 data")
+	}
 	tmp := serializedDataContent{
 		ContentHeader: t.ContentHeader,
 		Name:          t.Name,
@@ -384,6 +390,7 @@ func (t *FunctionCallContent) UnmarshalJSON(data []byte) error {
 	t.CallID = tmp.CallID
 	t.Name = tmp.Name
 	t.InformationalOnly = tmp.InformationalOnly
+	t.Error = nil
 	if tmp.Error != "" {
 		t.Error = errors.New(tmp.Error)
 	}
@@ -461,6 +468,7 @@ func (t *FunctionResultContent) UnmarshalJSON(data []byte) error {
 	} else {
 		t.Result = nil
 	}
+	t.Error = nil
 	if tmp.Error != "" {
 		t.Error = errors.New(tmp.Error)
 	} else {
@@ -601,7 +609,15 @@ func NewURIContent(uri string, mediaType string) (*URIContent, error) {
 		return nil, err
 	}
 	if mediaType == "" {
-		mediaType = inferMediaTypeFromURI(uri)
+		if strings.HasPrefix(strings.ToLower(uri), dataURIScheme) {
+			parsed, err := parseDataURI(uri)
+			if err != nil {
+				return nil, err
+			}
+			mediaType = parsed.MediaType
+		} else {
+			mediaType = inferMediaTypeFromURI(uri)
+		}
 	} else if !isValidMediaType(mediaType) {
 		return nil, fmt.Errorf("invalid media type: %s", mediaType)
 	}
@@ -1027,7 +1043,14 @@ func CoalesceContents(contents []Content) []Content {
 
 	contents = coalesce(contents, false,
 		func(a, b *DataContent) bool {
-			return strings.EqualFold(a.MediaType, b.MediaType) && a.TopLevelMediaType() == "text" && a.Name == b.Name
+			if !strings.EqualFold(a.MediaType, b.MediaType) || a.TopLevelMediaType() != "text" || a.Name != b.Name {
+				return false
+			}
+			if _, err := a.Bytes(); err != nil {
+				return false
+			}
+			_, err := b.Bytes()
+			return err == nil
 		},
 		func(contents []Content, start, end int) *DataContent {
 			first := contents[start].(*DataContent)
