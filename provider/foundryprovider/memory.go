@@ -42,13 +42,13 @@ type MemoryProviderConfig struct {
 	// default is [messagefilter.ExternalOnly].
 	SearchInputFilter messagefilter.Filter
 
-	// StoreInputRequestFilter filters request messages before they are stored as
+	// StorageInputRequestMessageFilter filters request messages before they are stored as
 	// memories. The default is [messagefilter.ExternalOnly].
-	StoreInputRequestFilter messagefilter.Filter
+	StorageInputRequestMessageFilter messagefilter.Filter
 
-	// StoreInputResponseFilter filters response messages before they are stored as
+	// StorageInputResponseMessageFilter filters response messages before they are stored as
 	// memories. The default is [messagefilter.PassThrough].
-	StoreInputResponseFilter messagefilter.Filter
+	StorageInputResponseMessageFilter messagefilter.Filter
 
 	// UpdateDelay controls Foundry memory extraction delay in seconds. The default is 0,
 	// which submits memory updates immediately.
@@ -105,18 +105,15 @@ func newMemoryProvider(client *azaiprojects.MemoryStoresClient, memoryStoreName 
 	if config.MaxMemories == 0 {
 		config.MaxMemories = defaultMaxMemories
 	}
-	if config.SearchInputFilter == nil {
-		config.SearchInputFilter = messagefilter.ExternalOnly
-	}
-	// StoreInputRequestFilter and StoreInputResponseFilter are intentionally left
-	// nil when unset: ContextProviderConfig already defaults a nil store request
-	// filter to messagefilter.ExternalOnly and a nil store response filter to
-	// messagefilter.PassThrough, so re-setting them here would be redundant.
+	// All three filters are intentionally left nil when unset: ContextProviderConfig
+	// already defaults a nil provide/store-request filter to messagefilter.ExternalOnly
+	// and a nil store-response filter to messagefilter.PassThrough, so re-setting them
+	// here would be redundant.
 	providerConfig := agent.ContextProviderConfig{
 		ProvideInputMessageFilter:       config.SearchInputFilter,
 		SourceID:                        defaultSourceID,
-		StoreInputRequestMessageFilter:  config.StoreInputRequestFilter,
-		StoreInputResponseMessageFilter: config.StoreInputResponseFilter,
+		StoreInputRequestMessageFilter:  config.StorageInputRequestMessageFilter,
+		StoreInputResponseMessageFilter: config.StorageInputResponseMessageFilter,
 	}
 	p := &MemoryProvider{
 		client:          client,

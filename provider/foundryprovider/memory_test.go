@@ -105,9 +105,9 @@ func TestNewMemoryProviderUsesCustomStoreFilters(t *testing.T) {
 		return messages, nil
 	}
 	provider := foundryprovider.NewMemoryProvider(validEndpoint, validCredential, "memory", validScope, foundryprovider.MemoryProviderConfig{
-		ClientOptions:            azcore.ClientOptions{Transport: transport},
-		StoreInputRequestFilter:  requestFilter,
-		StoreInputResponseFilter: responseFilter,
+		ClientOptions:                     azcore.ClientOptions{Transport: transport},
+		StorageInputRequestMessageFilter:  requestFilter,
+		StorageInputResponseMessageFilter: responseFilter,
 	})
 
 	err := provider.Invoked(t.Context(), agent.InvokedContext{
