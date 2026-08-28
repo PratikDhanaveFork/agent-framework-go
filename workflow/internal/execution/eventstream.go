@@ -332,6 +332,45 @@ func (s *streamingRunEventStream) TakeEventStream(ctx context.Context, blockOnPe
 	}
 
 	return func(yield func(workflow.Event, error) bool) {
+		// Fast path: the run has already halted and there is no fresh work. The
+		// halt signal is a one-shot queue item, so a prior consumer may have
+		// already drained it for this epoch; blocking in nextEvent would then wait
+		// forever for a signal that is never re-emitted (the run loop is parked
+		// awaiting input). Drain whatever is still queued and stop at the
+		// terminal/pending halt instead, mirroring the lockstep stream. The
+		// blockOnPendingRequest path still falls through to block for serviced input.
+		if !expectingFreshWork {
+			for {
+				evt, ok := s.eventQueue.Dequeue()
+				if !ok {
+					break
+				}
+				if signal, ok := evt.(*internalHaltSignal); ok {
+					if signal.epoch < myEpoch {
+						continue
+					}
+					if signal.status == RunStatusIdle || signal.status == RunStatusEnded {
+						return
+					}
+					if !blockOnPendingRequest && signal.status == RunStatusPendingRequests {
+						return
+					}
+					continue
+				}
+				if !yield(evt, nil) {
+					return
+				}
+			}
+			switch s.getStatus() {
+			case RunStatusIdle, RunStatusEnded:
+				return
+			case RunStatusPendingRequests:
+				if !blockOnPendingRequest {
+					return
+				}
+			}
+		}
+
 		for {
 			evt, ok := s.nextEvent(ctx)
 			if !ok {
