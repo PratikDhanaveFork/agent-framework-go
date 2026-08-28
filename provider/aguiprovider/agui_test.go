@@ -713,3 +713,30 @@ func writeSSE(t *testing.T, w http.ResponseWriter, evt aguiEvents.Event) {
 func newTestClient(endpoint string) *aguiSSEClient.Client {
 	return aguiSSEClient.NewClient(aguiSSEClient.Config{Endpoint: endpoint})
 }
+
+func TestAGUIAgentRun_SurfacesReasoningMessageChunkEvents(t *testing.T) {
+	strPtr := func(s string) *string { return &s }
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		writeSSE(t, w, aguiEvents.NewRunStartedEvent("thread-1", "run-1"))
+		writeSSE(t, w, aguiEvents.NewReasoningMessageChunkEvent(strPtr("r1"), strPtr("think")))
+		writeSSE(t, w, aguiEvents.NewReasoningMessageChunkEvent(strPtr("r1"), strPtr("ing")))
+		writeSSE(t, w, aguiEvents.NewRunFinishedEvent("thread-1", "run-1"))
+	}))
+	defer server.Close()
+
+	a := aguiprovider.NewAgent(newTestClient(server.URL), aguiprovider.AgentConfig{})
+	resp, err := a.RunText(context.Background(), "hi").Collect()
+	if err != nil {
+		t.Fatalf("run error: %v", err)
+	}
+	var reasoning string
+	for content := range resp.Contents() {
+		if rc, ok := content.(*message.TextReasoningContent); ok {
+			reasoning += rc.Text
+		}
+	}
+	if reasoning != "thinking" {
+		t.Fatalf("reasoning text = %q, want %q", reasoning, "thinking")
+	}
+}

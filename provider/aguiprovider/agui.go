@@ -446,6 +446,22 @@ func (a *toolCallAccumulator) onEvent(evt aguiEvents.Event) ([]*agent.ResponseUp
 			CreatedAt: eventTime(evt),
 			Contents:  message.Contents{&message.TextContent{Text: delta}},
 		}}, nil
+	case *aguiEvents.ReasoningMessageChunkEvent:
+		delta := deref(e.Delta)
+		if delta == "" {
+			return nil, nil
+		}
+		// A chunk may omit MessageID to continue the current reasoning message;
+		// reuse the last seen chunk MessageID, mirroring the text-chunk handling.
+		if id := deref(e.MessageID); id != "" {
+			a.lastChunkMessageID = id
+		}
+		return []*agent.ResponseUpdate{{
+			Role:      message.RoleAssistant,
+			MessageID: a.lastChunkMessageID,
+			CreatedAt: eventTime(evt),
+			Contents:  message.Contents{&message.TextReasoningContent{Text: delta}},
+		}}, nil
 	case *aguiEvents.ReasoningMessageContentEvent:
 		return []*agent.ResponseUpdate{{
 			Role:      message.RoleAssistant,
