@@ -128,16 +128,17 @@ func (p *contextProvider) markGeneratedMessages(messages, inputMessages []*messa
 	if len(messages) == 0 {
 		return messages
 	}
-	originals := make(map[*message.Message]struct{}, len(inputMessages))
-	for _, msg := range inputMessages {
-		originals[msg] = struct{}{}
-	}
 	source := message.Source{Type: agent.SourceTypeContextProvider, ID: p.sourceID}
 	for i, msg := range messages {
-		if _, ok := originals[msg]; ok {
+		if msg == nil || msg.Source == source {
 			continue
 		}
-		if msg == nil || msg.Source == source {
+		// A message is provider-generated only when it is not one of this turn's
+		// input messages. Compare by content, not pointer identity: with a session
+		// the index is rebuilt from persisted groups whose message pointers differ
+		// from the incoming messages, so an identity check would wrongly stamp
+		// genuine prior-turn history as context-provider generated.
+		if containsMessageByContent(inputMessages, msg) {
 			continue
 		}
 		marked := msg.Clone()
@@ -145,4 +146,13 @@ func (p *contextProvider) markGeneratedMessages(messages, inputMessages []*messa
 		messages[i] = marked
 	}
 	return messages
+}
+
+func containsMessageByContent(messages []*message.Message, target *message.Message) bool {
+	for _, candidate := range messages {
+		if messageContentEqual(candidate, target) {
+			return true
+		}
+	}
+	return false
 }
