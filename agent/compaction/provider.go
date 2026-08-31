@@ -98,6 +98,11 @@ func (p *contextProvider) Invoking(ctx context.Context, invoking agent.InvokingC
 	var index *MessageIndex
 	if len(state.MessageGroups) > 0 {
 		index = NewMessageIndex(state.MessageGroups, p.tokenCounter)
+		// Treat every message restored from persisted compaction state as chat
+		// history before folding in this turn's input (matching .NET). This keeps
+		// markGeneratedMessages from re-attributing restored history and prevents
+		// those messages from being re-stored as new messages at the end of the run.
+		p.markRestoredMessagesAsHistory(index)
 		index.Update(messages)
 	} else {
 		index = CreateMessageIndex(messages, p.tokenCounter)
@@ -130,7 +135,7 @@ func (p *contextProvider) markGeneratedMessages(messages, inputMessages []*messa
 	}
 	source := message.Source{Type: agent.SourceTypeContextProvider, ID: p.sourceID}
 	for i, msg := range messages {
-		if msg == nil || msg.Source == source {
+		if msg == nil || msg.Source == source || msg.Source.Type == agent.SourceTypeHistoryProvider {
 			continue
 		}
 		// A message is provider-generated only when it is not one of this turn's
@@ -146,6 +151,20 @@ func (p *contextProvider) markGeneratedMessages(messages, inputMessages []*messa
 		messages[i] = marked
 	}
 	return messages
+}
+
+// markRestoredMessagesAsHistory stamps every message restored from persisted
+// compaction state with the history source so it is not later re-attributed as
+// provider-generated or re-stored as a new message.
+func (p *contextProvider) markRestoredMessagesAsHistory(index *MessageIndex) {
+	source := message.Source{Type: agent.SourceTypeHistoryProvider, ID: p.sourceID}
+	for _, group := range index.Groups {
+		for _, msg := range group.Messages {
+			if msg != nil {
+				msg.Source = source
+			}
+		}
+	}
 }
 
 func containsMessageByContent(messages []*message.Message, target *message.Message) bool {

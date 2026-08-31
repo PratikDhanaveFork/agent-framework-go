@@ -729,7 +729,12 @@ func TestNewProvider_KeepsRetainedHistorySourceAcrossTurns(t *testing.T) {
 	cp := message.Source{Type: agent.SourceTypeContextProvider, ID: "compaction-test"}
 	for i, msg := range out {
 		if msg.Source == cp {
-			t.Errorf("message %d (%q) mislabeled as context-provider generated; genuine history must keep its original Source", i, msg.String())
+			t.Errorf("message %d (%q) mislabeled as context-provider generated; genuine history must not be attributed to the provider", i, msg.String())
 		}
+	}
+	// Retained prior-turn history restored from compaction state is attributed as
+	// chat history (matching .NET), not context-provider generated.
+	if len(out) < 2 || out[0].Source.Type != agent.SourceTypeHistoryProvider || out[1].Source.Type != agent.SourceTypeHistoryProvider {
+		t.Errorf("retained history should be marked as chat history, got %#v and %#v", out[0].Source, out[1].Source)
 	}
 }
