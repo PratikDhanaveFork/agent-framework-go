@@ -700,11 +700,16 @@ func buildMessageParam(msg *message.Message) (anthropic.MessageParam, error) {
 				// data: handling.
 				data, mediaType, err := message.DecodeDataURI(c.URI)
 				if err != nil {
-					break
+					return anthropic.MessageParam{}, fmt.Errorf("anthropicprovider: failed to decode data URI content: %w", err)
+				}
+				// An explicit URIContent.MediaType overrides the one parsed from the
+				// data: URI, matching the gemini provider.
+				if c.MediaType != "" {
+					mediaType = c.MediaType
 				}
 				encoded := base64.StdEncoding.EncodeToString(data)
 				switch {
-				case strings.HasPrefix(mediaType, "image/"):
+				case strings.HasPrefix(strings.ToLower(mediaType), "image/"):
 					content = append(content, anthropic.NewImageBlockBase64(mediaType, encoded))
 				case isPDFMediaType(mediaType):
 					content = append(content, anthropic.NewDocumentBlock(anthropic.Base64PDFSourceParam{Data: encoded}))

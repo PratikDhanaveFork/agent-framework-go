@@ -1551,7 +1551,7 @@ func TestBuildMessageParam_DataURIImageForwardedAsBase64(t *testing.T) {
 		for _, b := range blocks {
 			block, _ := b.(map[string]any)
 			source, _ := block["source"].(map[string]any)
-			if block["type"] == "image" && source["type"] == "base64" && source["media_type"] == "image/png" {
+			if block["type"] == "image" && source["type"] == "base64" && source["media_type"] == "image/png" && source["data"] == "aGVsbG8=" {
 				base64Image = true
 			}
 		}
