@@ -1027,3 +1027,24 @@ func TestBuilder_ConditionalEdgeDoesNotDropIdempotentConditionlessEdge(t *testin
 		t.Fatalf("edges from start: conditional=%d conditionless=%d, want 1 and 1", conditional, conditionless)
 	}
 }
+
+type shapeForTypeCompat interface{ area() float64 }
+
+type circleForTypeCompat struct{}
+
+func (circleForTypeCompat) area() float64 { return 1 }
+
+func TestBuilder_Validation_TypeCompatibility_InterfaceSendConcreteTarget(t *testing.T) {
+	// Source declares it sends the interface type; target accepts a concrete
+	// type that implements it. The source may emit that concrete value, so the
+	// edge is valid and must build (type-set overlap is symmetric).
+	source := newDeclaredSendExecutor[string]("source", reflect.TypeFor[shapeForTypeCompat]())
+	target := newTypedExecutor[circleForTypeCompat, string]("target")
+
+	_, err := workflow.NewBuilder(source).
+		AddEdge(source, target).
+		Build()
+	if err != nil {
+		t.Fatalf("expected interface-send/concrete-target edge to build, got: %v", err)
+	}
+}

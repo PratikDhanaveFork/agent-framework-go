@@ -468,7 +468,12 @@ func sendTypeCompatibleWithInput(outType, inType reflect.Type) bool {
 	if outType == reflect.TypeFor[any]() {
 		return true
 	}
-	return outType == inType || outType.AssignableTo(inType) || (inType.Kind() == reflect.Interface && outType.Implements(inType))
+	// Compatibility (type-set overlap) is symmetric: the edge is valid when a
+	// concrete value can satisfy both sides. Also accept the case where the
+	// target input type is assignable to the sent type - e.g. an interface send
+	// type with a concrete target that implements it (source may emit that
+	// concrete value).
+	return outType == inType || outType.AssignableTo(inType) || inType.AssignableTo(outType)
 }
 
 func (wb *Builder) trackInputPort(port RequestPort) bool {
