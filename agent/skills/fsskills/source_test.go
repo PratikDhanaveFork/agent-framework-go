@@ -706,3 +706,29 @@ func createSymlink(t *testing.T, linkPath, targetPath string) {
 		t.Skipf("symlink creation unavailable: %v", err)
 	}
 }
+
+func TestFileSource_MetadataWithBlankLine_KeepsAllKeys(t *testing.T) {
+	root := t.TempDir()
+	createSkillDirRaw(t, root, "gap-meta", strings.Join([]string{
+		"---",
+		"name: gap-meta",
+		"description: d",
+		"metadata:",
+		"  a: 1",
+		"",
+		"  b: 2",
+		"  c: 3",
+		"---",
+		"Body.",
+	}, "\n"))
+
+	source := fsskills.NewSource(os.DirFS(root))
+	loaded, err := source.Skills(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := loaded[0].Frontmatter.Metadata
+	if m["a"] != "1" || m["b"] != "2" || m["c"] != "3" {
+		t.Fatalf("metadata keys dropped after blank line: %#v", m)
+	}
+}
