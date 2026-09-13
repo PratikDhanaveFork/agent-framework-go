@@ -676,10 +676,18 @@ func (p *provider) assistantMessageUpdate(event copilot.SessionEvent, data *copi
 		// as CitationAnnotations, mirroring the OpenAI chat/Responses providers.
 		if data.Citations != nil {
 			for _, source := range data.Citations.Sources {
+				fileID := firstNonNilString(source.Path)
+				title := firstNonNilString(source.Title)
+				url := firstNonNilString(source.URL)
+				// Skip sources with no usable fields so we do not emit an empty
+				// annotation, matching the filtering other providers apply.
+				if fileID == "" && title == "" && url == "" {
+					continue
+				}
 				textContent.Annotations = append(textContent.Annotations, &message.CitationAnnotation{
-					FileID:            derefString(source.Path),
-					Title:             derefString(source.Title),
-					URL:               derefString(source.URL),
+					FileID:            fileID,
+					Title:             title,
+					URL:               url,
 					RawRepresentation: source,
 				})
 			}
@@ -846,13 +854,6 @@ func additionalUsageCounts(data *copilot.AssistantUsageData) map[string]int64 {
 func int64Value(value *int64) int64 {
 	if value == nil {
 		return 0
-	}
-	return *value
-}
-
-func derefString(value *string) string {
-	if value == nil {
-		return ""
 	}
 	return *value
 }

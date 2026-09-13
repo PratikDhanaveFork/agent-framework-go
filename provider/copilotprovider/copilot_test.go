@@ -1304,3 +1304,31 @@ func TestConvertToAgentResponseUpdate_AssistantMessageSurfacesCitations(t *testi
 		t.Errorf("citation = %#v, want Title=%q URL=%q", citation, "Sky facts", "https://example.com/sky")
 	}
 }
+
+func TestConvertToAgentResponseUpdate_AssistantMessageSkipsEmptyCitationSources(t *testing.T) {
+	runtime := newFakeRuntime(t,
+		sessionEvent("assistant.message", map[string]any{
+			"messageId": "msg-empty-cite",
+			"content":   "No usable citation here.",
+			"citations": map[string]any{
+				"sources": []any{
+					map[string]any{"id": "s1", "provider": "client"}, // no path/title/url
+				},
+				"spans": []any{},
+			},
+		}),
+		idleEvent(),
+	)
+	agent := copilotprovider.NewAgent(runtime.client(), copilotprovider.AgentConfig{})
+
+	response, err := runText(t, agent, "hi", agentpkg.Stream(false))
+	if err != nil {
+		t.Fatalf("RunText: %v", err)
+	}
+	text := firstContent[*message.TextContent](t, response)
+	for _, ann := range text.Annotations {
+		if _, ok := ann.(*message.CitationAnnotation); ok {
+			t.Fatalf("expected no CitationAnnotation for a source with no usable fields, got %#v", ann)
+		}
+	}
+}
