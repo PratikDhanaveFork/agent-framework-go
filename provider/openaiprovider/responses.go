@@ -1357,6 +1357,10 @@ type responsesStreamState struct {
 	messageID           string
 	role                message.Role
 	anyFunctions        bool
+	// imagePartialsSeen records image-generation item IDs that emitted a
+	// partial_image event, so the output_item.done handler does not emit a
+	// duplicate final image for them.
+	imagePartialsSeen map[string]bool
 }
 
 // responsesProcessStreamingUpdate processes a streaming update from the Responses API.
@@ -1532,6 +1536,10 @@ func responsesProcessStreamingUpdate(update responses.ResponseStreamEventUnion, 
 		}
 
 	case responses.ResponseImageGenCallPartialImageEvent:
+		if state.imagePartialsSeen == nil {
+			state.imagePartialsSeen = map[string]bool{}
+		}
+		state.imagePartialsSeen[event.ItemID] = true
 		result := imageGenerationResult(event.ItemID, event.PartialImageB64, cmp.Or(event.OutputFormat, "png"), event)
 		result.Outputs[0].Header().AdditionalProperties = map[string]any{
 			"ItemId":            event.ItemID,
@@ -1626,7 +1634,13 @@ func responsesProcessStreamingUpdate(update responses.ResponseStreamEventUnion, 
 		case responses.ResponseFunctionWebSearch:
 			u.Contents = webSearchContents(item)
 		case responses.ResponseOutputItemImageGenerationCall:
-			// Dedicated image-generation events emit the call and partial results.
+			// The dedicated partial_image events emit the image incrementally, but
+			// they are only sent when partial_images > 0. In the default case no
+			// partial event arrives and the finished image lives on the done item,
+			// so emit it here unless a partial was already seen for this item.
+			if !state.imagePartialsSeen[item.ID] {
+				u.Contents = imageGenerationContents(item)
+			}
 		case responses.ResponseReasoningItem:
 			// Carry the completed reasoning item's encrypted content so it can be
 			// replayed on the next turn when store=false (reasoning delta events only
