@@ -1064,9 +1064,23 @@ func responsesProcessResponse(resp *responses.Response, seqNum int64, yield func
 		}
 	}
 
+	// The Responses API reports status "completed" even for turns that only
+	// emitted function calls, so synthesize the tool_calls finish reason when
+	// the output contains a function call - mirroring the streaming path (and
+	// the Chat provider, which reports tool_calls natively).
+	finishReason := responsesFinishReason(resp)
+	for _, out := range resp.Output {
+		if _, ok := out.AsAny().(responses.ResponseFunctionToolCall); ok {
+			if finishReason == "stop" {
+				finishReason = "tool_calls"
+			}
+			break
+		}
+	}
+
 	currentUpdate := &agent.ResponseUpdate{
 		ResponseID:           resp.ID,
-		FinishReason:         responsesFinishReason(resp),
+		FinishReason:         finishReason,
 		CreatedAt:            time.Unix(int64(resp.CreatedAt), 0),
 		Role:                 message.RoleAssistant,
 		AdditionalProperties: responsesPopulateAdditionalProperties(resp),
@@ -1093,7 +1107,7 @@ func responsesProcessResponse(resp *responses.Response, seqNum int64, yield func
 			}
 			currentUpdate.MessageID = out.ID
 			currentUpdate.ResponseID = resp.ID
-			currentUpdate.FinishReason = responsesFinishReason(resp)
+			currentUpdate.FinishReason = finishReason
 			// Only set ContinuationToken if it's not empty
 			if contToken != "" {
 				currentUpdate.ContinuationToken = contToken
