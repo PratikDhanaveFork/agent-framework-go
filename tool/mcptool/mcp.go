@@ -11,6 +11,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 	"unicode/utf8"
 
@@ -20,6 +21,9 @@ import (
 )
 
 // AddTool registers a tool.FuncTool on the given mcp.Server so it is exposed to MCP clients.
+// Native mcp.Content and []mcp.Content results are returned as MCP content blocks;
+// they must contain content types valid in a tool response. Nil content entries
+// are represented as the text "null". A *mcp.CallToolResult is returned as-is.
 func AddTool(src *mcp.Server, tl tool.FuncTool) {
 	src.AddTool(&mcp.Tool{
 		Name:         tl.Name(),
@@ -46,13 +50,8 @@ func Connect(ctx context.Context, transport mcp.Transport) (*mcp.ClientSession, 
 	return client.Connect(ctx, transport, nil)
 }
 
-// ListTools enumerates the remote server's tools and wraps each as a tool.Tool.
+// ListTools enumerates all pages of the remote server's tools and wraps each as a tool.Tool.
 func ListTools(ctx context.Context, session *mcp.ClientSession) ([]tool.Tool, error) {
-	toolsResult, err := session.ListTools(ctx, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to list tools: %w", err)
-	}
-
 	// Create agent.Tool instances for each MCP tool.
 	//
 	// Normalization (normalizeMCPName) can map distinct remote names onto the
@@ -62,9 +61,12 @@ func ListTools(ctx context.Context, session *mcp.ClientSession) ([]tool.Tool, er
 	// first tool. Detect it here and fail loudly so the caller gets a clear
 	// signal instead of missing/unreachable tools.
 	// Create tool.Tool instances for each MCP tool
-	result := make([]tool.Tool, 0, len(toolsResult.Tools))
-	seen := make(map[string]string, len(toolsResult.Tools))
-	for _, mcpTool := range toolsResult.Tools {
+	result := make([]tool.Tool, 0)
+	seen := make(map[string]string)
+	for mcpTool, err := range session.Tools(ctx, nil) {
+		if err != nil {
+			return nil, fmt.Errorf("failed to list tools: %w", err)
+		}
 		agentTool := newMCPToolWrapper(session, mcpTool)
 		if existing, ok := seen[agentTool.name]; ok {
 			return nil, fmt.Errorf("normalized MCP tool name collision: remote tools %q and %q both normalize to %q", existing, mcpTool.Name, agentTool.name)
@@ -293,6 +295,14 @@ func agentResultToMCPCallToolResult(result any) *mcp.CallToolResult {
 		return &mcp.CallToolResult{}
 	case *mcp.CallToolResult:
 		return resultValue
+	case mcp.Content:
+		return &mcp.CallToolResult{Content: []mcp.Content{nativeMCPContentOrNull(resultValue)}}
+	case []mcp.Content:
+		contents := make([]mcp.Content, len(resultValue))
+		for i, content := range resultValue {
+			contents[i] = nativeMCPContentOrNull(content)
+		}
+		return &mcp.CallToolResult{Content: contents}
 	case string:
 		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: resultValue}}}
 	case json.RawMessage:
@@ -321,6 +331,15 @@ func agentResultToMCPCallToolResult(result any) *mcp.CallToolResult {
 	default:
 		return structuredResultToMCPCallToolResult(resultValue)
 	}
+}
+
+// Native MCP content should remain a protocol content block. Nil pointers need
+// a fallback because the SDK content marshalers dereference their receivers.
+func nativeMCPContentOrNull(content mcp.Content) mcp.Content {
+	if content == nil || (reflect.ValueOf(content).Kind() == reflect.Pointer && reflect.ValueOf(content).IsNil()) {
+		return &mcp.TextContent{Text: "null"}
+	}
+	return content
 }
 
 func functionResultToMCPCallToolResult(functionResult *message.FunctionResultContent) *mcp.CallToolResult {
