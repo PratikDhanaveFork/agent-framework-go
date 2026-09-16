@@ -99,8 +99,8 @@ func (strategy *ToolResultStrategy) Compact(_ context.Context, index *MessageInd
 	return compacted, nil
 }
 
-// DefaultToolCallFormatter produces a YAML-like summary of tool-call groups, including tool names,
-// results, and deduplication counts for repeated tool names.
+// DefaultToolCallFormatter produces a YAML-like summary of tool-call groups, listing each
+// tool name once with its results grouped beneath it.
 //
 // This is the formatter used when no custom ToolCallFormatter is supplied. It can be referenced
 // directly in a custom formatter to augment or wrap the default output.
