@@ -350,6 +350,44 @@ func TestToolResultStrategy_CollapsesOldToolGroups(t *testing.T) {
 	}
 }
 
+func TestDefaultToolCallFormatter_ResultTypes(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		result any
+		want   string
+	}{
+		{name: "raw JSON object", result: json.RawMessage(`{"status":"shipped"}`), want: "[Tool Calls]\nlookup:\n  - {\"status\":\"shipped\"}"},
+		{name: "raw JSON array", result: json.RawMessage(`["first","second"]`), want: "[Tool Calls]\nlookup:\n  - [\"first\",\"second\"]"},
+		{name: "raw JSON null", result: json.RawMessage(`null`), want: "[Tool Calls]\nlookup:\n  - null"},
+		{name: "empty raw JSON", result: json.RawMessage{}, want: "[Tool Calls]\nlookup:"},
+		{name: "nil raw JSON", result: json.RawMessage(nil), want: "[Tool Calls]\nlookup:"},
+		{name: "string", result: "shipped", want: "[Tool Calls]\nlookup:\n  - shipped"},
+		{name: "number", result: 42, want: "[Tool Calls]\nlookup:\n  - 42"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			group := &compaction.MessageGroup{
+				Messages: []*message.Message{
+					{
+						Role: message.RoleAssistant,
+						Contents: []message.Content{
+							&message.FunctionCallContent{CallID: "call-1", Name: "lookup"},
+						},
+					},
+					{
+						Role: message.RoleTool,
+						Contents: []message.Content{
+							&message.FunctionResultContent{CallID: "call-1", Result: tc.result},
+						},
+					},
+				},
+			}
+			if got := compaction.DefaultToolCallFormatter(group); got != tc.want {
+				t.Fatalf("formatter output = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestDefaultToolCallFormatter_DedupsRepeatedNamesWithEmptyResults guards the
 // tool-name deduplication when repeated calls to the same tool produce empty
 // results. The name must still be listed exactly once, matching the behavior

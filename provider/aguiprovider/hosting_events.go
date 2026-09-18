@@ -223,6 +223,12 @@ func updatesToAGUIEvents(
 					if !closeReasoning() {
 						return
 					}
+					// Close any open text message before emitting non-text events
+					// (e.g. a tool call) so their AG-UI lifecycles stay disjoint
+					// rather than nesting the tool call inside an unclosed message.
+					if !closeText() {
+						return
+					}
 				}
 				for _, e := range events {
 					if !yield(e, nil) {
