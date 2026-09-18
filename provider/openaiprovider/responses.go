@@ -1639,7 +1639,10 @@ func responsesProcessStreamingUpdate(update responses.ResponseStreamEventUnion, 
 			// partial event arrives and the finished image lives on the done item,
 			// so emit it here unless a partial was already seen for this item.
 			if !state.imagePartialsSeen[item.ID] {
-				u.Contents = imageGenerationContents(item)
+				// The in-progress event already emitted the ImageGenerationToolCallContent
+				// for this item, so emit only the finished result here to avoid a
+				// duplicate tool call.
+				u.Contents = []message.Content{imageGenerationResult(item.ID, item.Result, "png", item)}
 			}
 		case responses.ResponseReasoningItem:
 			// Carry the completed reasoning item's encrypted content so it can be

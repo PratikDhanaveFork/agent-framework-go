@@ -7810,15 +7810,24 @@ data: {"type":"response.completed","sequence_number":3,"response":{"id":"resp_00
 
 	a := newTestResponsesClient(server, "gpt-4o-mini")
 	var result *message.ImageGenerationToolResultContent
+	var calls int
 	for update, err := range a.RunText(t.Context(), "draw", agent.Stream(true)) {
 		if err != nil {
 			t.Fatalf("error = %v", err)
 		}
 		for _, content := range update.Contents {
-			if r, ok := content.(*message.ImageGenerationToolResultContent); ok {
-				result = r
+			switch c := content.(type) {
+			case *message.ImageGenerationToolCallContent:
+				calls++
+			case *message.ImageGenerationToolResultContent:
+				result = c
 			}
 		}
+	}
+	// The call is emitted once (from the in-progress event); the done event must
+	// add the result without re-emitting the call.
+	if calls != 1 {
+		t.Fatalf("ImageGenerationToolCallContent count = %d, want 1", calls)
 	}
 	if result == nil || result.CallID != "ig_123" || len(result.Outputs) != 1 {
 		t.Fatalf("result = %#v, want one output for CallID ig_123", result)
