@@ -2497,11 +2497,13 @@ func TestFinishReason_NonStreaming(t *testing.T) {
 		{"stop", "STOP", "stop"},
 		{"max_tokens", "MAX_TOKENS", "length"},
 		{"safety", "SAFETY", "content_filter"},
+		{"language", "LANGUAGE", "content_filter"},
 		{"image_safety", "IMAGE_SAFETY", "content_filter"},
 		{"image_prohibited_content", "IMAGE_PROHIBITED_CONTENT", "content_filter"},
 		{"image_recitation", "IMAGE_RECITATION", "content_filter"},
 		{"malformed_function_call", "MALFORMED_FUNCTION_CALL", "tool_calls"},
 		{"too_many_tool_calls", "TOO_MANY_TOOL_CALLS", "tool_calls"},
+		{"unexpected_tool_call", "UNEXPECTED_TOOL_CALL", "tool_calls"},
 		{"unmapped", "OTHER", ""},
 	}
 	for _, tt := range tests {

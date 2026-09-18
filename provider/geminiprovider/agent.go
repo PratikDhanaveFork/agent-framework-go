@@ -773,12 +773,14 @@ func toFinishReason(reason genai.FinishReason) string {
 	case genai.FinishReasonMaxTokens:
 		return "length"
 	case genai.FinishReasonSafety, genai.FinishReasonRecitation,
+		genai.FinishReasonLanguage,
 		genai.FinishReasonBlocklist, genai.FinishReasonProhibitedContent,
 		genai.FinishReasonSPII,
 		genai.FinishReasonImageSafety, genai.FinishReasonImageProhibitedContent,
 		genai.FinishReasonImageRecitation:
 		return "content_filter"
-	case genai.FinishReasonMalformedFunctionCall, genai.FinishReasonTooManyToolCalls:
+	case genai.FinishReasonMalformedFunctionCall, genai.FinishReasonTooManyToolCalls,
+		genai.FinishReasonUnexpectedToolCall:
 		return "tool_calls"
 	default:
 		return ""
