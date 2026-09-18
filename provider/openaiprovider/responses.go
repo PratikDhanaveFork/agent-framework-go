@@ -239,7 +239,7 @@ func (a *responsesClient) run(ctx context.Context, messages []*message.Message, 
 	}
 }
 
-// buildCompletionParams constructs the parameters for the OpenAI chat completion API.
+// responsesBuildCompletionParams constructs the parameters for the OpenAI Responses API.
 func responsesBuildCompletionParams(config AgentConfig, messages []*message.Message, opts []agent.Option) (responses.ResponseNewParams, error) {
 	var params responses.ResponseNewParams
 	if p, ok := agent.GetOption(opts, ResponsesNewParams); ok {

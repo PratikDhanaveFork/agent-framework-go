@@ -549,9 +549,9 @@ func buildMessageParam(msg *message.Message) ([]openai.ChatCompletionMessagePara
 // sanitizeAuthorName mirrors the .NET OpenAIChatClient.SanitizeAuthorName used
 // for ChatMessage.AuthorName. The Chat Completions API only accepts a limited
 // character set for the participant "name" field, so it keeps only alphanumeric
-// characters and caps the result at 64 characters. It returns an empty string
-// when the input is empty, whitespace-only, or entirely disallowed characters,
-// in which case the caller leaves the name field unset.
+// characters and underscores and caps the result at 64 characters. It returns an
+// empty string when the input is empty, whitespace-only, or contains no such
+// characters, in which case the caller leaves the name field unset.
 func sanitizeAuthorName(name string) string {
 	if strings.TrimSpace(name) == "" {
 		return ""
