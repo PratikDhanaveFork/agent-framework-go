@@ -13,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/microsoft/agent-framework-go/agent"
@@ -1930,4 +1931,143 @@ func messageTexts(messages []*message.Message) []string {
 		}
 	}
 	return texts
+}
+
+func TestFunctionInvoking_RequestCancellation(t *testing.T) {
+	toolFailure := errors.New("first failed")
+	secondFailure := errors.New("second failed")
+	wrappedFailure := fmt.Errorf("wrapped error: %w", toolFailure)
+	for _, tc := range []struct {
+		name          string
+		cancelAt      string
+		deadline      bool
+		concurrent    bool
+		maxIterations *int
+		toolErrors    []error
+		wantErrors    []error
+		wantTools     int32
+		wantProviders int
+	}{
+		{name: "before request", cancelAt: "before request", wantErrors: []error{context.Canceled}},
+		{name: "before request with autocall disabled", cancelAt: "before request", maxIterations: new(0), wantErrors: []error{context.Canceled}},
+		{name: "expired request with autocall disabled", cancelAt: "before request", deadline: true, maxIterations: new(0), wantErrors: []error{context.DeadlineExceeded}},
+		{name: "active request with autocall disabled", maxIterations: new(0), wantProviders: 1},
+		{name: "before tools", cancelAt: "before tools", wantProviders: 1, wantErrors: []error{context.Canceled}},
+		{name: "before concurrent tools", cancelAt: "before tools", concurrent: true, wantProviders: 1, wantErrors: []error{context.Canceled}},
+		{name: "during first tool", cancelAt: "first tool", toolErrors: []error{context.Canceled}, wantTools: 1, wantProviders: 1, wantErrors: []error{context.Canceled}},
+		{name: "cancellation with tool failure", cancelAt: "first tool", toolErrors: []error{toolFailure}, wantTools: 1, wantProviders: 1, wantErrors: []error{toolFailure}},
+		{name: "cancellation with wrapped tool failure", cancelAt: "first tool", toolErrors: []error{wrappedFailure}, wantTools: 1, wantProviders: 1, wantErrors: []error{wrappedFailure}},
+		{name: "deadline with tool failure", cancelAt: "first tool", deadline: true, toolErrors: []error{toolFailure}, wantTools: 1, wantProviders: 1, wantErrors: []error{toolFailure}},
+		{name: "concurrent cancellation with tool failure", cancelAt: "concurrent tools", concurrent: true, toolErrors: []error{nil, toolFailure}, wantTools: 2, wantProviders: 1, wantErrors: []error{toolFailure}},
+		{name: "concurrent cancellation with multiple failures", cancelAt: "concurrent tools", concurrent: true, toolErrors: []error{toolFailure, secondFailure}, wantTools: 2, wantProviders: 1, wantErrors: []error{toolFailure, secondFailure}},
+		{name: "concurrent cancellation with cancelled sibling", cancelAt: "concurrent tools", concurrent: true, toolErrors: []error{toolFailure, context.Canceled}, wantTools: 2, wantProviders: 1, wantErrors: []error{toolFailure, context.Canceled}},
+		{name: "during successful first tool", cancelAt: "first tool", wantTools: 1, wantProviders: 1, wantErrors: []error{context.Canceled}},
+		{name: "during last tool", cancelAt: "last tool", toolErrors: []error{nil, context.Canceled}, wantTools: 2, wantProviders: 1, wantErrors: []error{context.Canceled}},
+		{name: "during concurrent tools", cancelAt: "concurrent tools", concurrent: true, toolErrors: []error{context.Canceled, context.Canceled}, wantTools: 2, wantProviders: 1, wantErrors: []error{context.Canceled, context.Canceled}},
+		{name: "during successful concurrent tools", cancelAt: "concurrent tools", concurrent: true, wantTools: 2, wantProviders: 1, wantErrors: []error{context.Canceled}},
+		{name: "deadline during first tool", cancelAt: "first tool", deadline: true, toolErrors: []error{context.DeadlineExceeded}, wantTools: 1, wantProviders: 1, wantErrors: []error{context.DeadlineExceeded}},
+		{name: "after tool results", cancelAt: "after results", wantTools: 2, wantProviders: 1, wantErrors: []error{context.Canceled}},
+		{name: "ordinary tool error", toolErrors: []error{toolFailure}, wantTools: 2, wantProviders: 2},
+		{name: "independent tool cancellation", toolErrors: []error{context.Canceled}, wantTools: 2, wantProviders: 2},
+		{name: "independent tool deadline", toolErrors: []error{context.DeadlineExceeded}, wantTools: 2, wantProviders: 2},
+		{name: "independent concurrent cancellation", concurrent: true, toolErrors: []error{context.Canceled}, wantTools: 2, wantProviders: 2},
+	} {
+		for _, stream := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/stream=%t", tc.name, stream), func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					ctx, cancel := context.WithTimeout(t.Context(), time.Hour)
+					defer cancel()
+					stop := func() {
+						if tc.deadline {
+							time.Sleep(time.Hour) // synctest advances time without a real wait.
+							<-ctx.Done()
+						} else {
+							cancel()
+						}
+					}
+					if tc.cancelAt == "before request" {
+						stop()
+					}
+					var toolCalls atomic.Int32
+					testTool := functool.MustNew(functool.Config{Name: "test_tool"}, func(context.Context, struct{}) (string, error) {
+						n := toolCalls.Add(1)
+						if tc.cancelAt == "first tool" && n == 1 || tc.cancelAt == "last tool" && n == 2 {
+							stop()
+						}
+						if tc.cancelAt == "concurrent tools" {
+							if n == 2 {
+								stop()
+							}
+							<-ctx.Done() // Both invocations must start before cancellation.
+						}
+						if int(n) <= len(tc.toolErrors) {
+							return "", tc.toolErrors[n-1]
+						}
+						return "result", nil
+					})
+					providerCalls := 0
+					provider := func(ctx context.Context, _ []*message.Message, _ ...agent.Option) iter.Seq2[*agent.ResponseUpdate, error] {
+						return func(yield func(*agent.ResponseUpdate, error) bool) {
+							providerCalls++
+							if providerCalls > 1 {
+								if err := ctx.Err(); err != nil {
+									yield(nil, err)
+								} else {
+									yield(&agent.ResponseUpdate{Role: message.RoleAssistant, Contents: message.Contents{&message.TextContent{Text: "Done"}}}, nil)
+								}
+								return
+							}
+							if tc.cancelAt == "before tools" {
+								stop()
+							}
+							calls := message.Contents{
+								&message.FunctionCallContent{CallID: "1", Name: "test_tool", Arguments: `{}`},
+								&message.FunctionCallContent{CallID: "2", Name: "test_tool", Arguments: `{}`},
+							}
+							if stream {
+								for _, call := range calls {
+									if !yield(&agent.ResponseUpdate{Role: message.RoleAssistant, Contents: message.Contents{call}}, nil) {
+										return
+									}
+								}
+							} else {
+								yield(&agent.ResponseUpdate{Role: message.RoleAssistant, Contents: calls}, nil)
+							}
+						}
+					}
+					var runErr error
+					for update, err := range toolautocall.New(toolautocall.Config{
+						AllowConcurrentInvocations:  tc.concurrent,
+						MaximumIterationsPerRequest: tc.maxIterations,
+					}).Run(
+						provider, ctx, []*message.Message{message.NewText("Call both tools.")}, agent.WithTool(testTool), agent.Stream(stream)) {
+						if err != nil {
+							runErr = err
+							break
+						}
+						if tc.cancelAt == "after results" && update != nil && update.Role == message.RoleTool {
+							stop()
+						}
+					}
+					if len(tc.wantErrors) == 0 && runErr != nil {
+						t.Errorf("unexpected run error: %v", runErr)
+					}
+					if len(tc.toolErrors) > 0 && len(tc.wantErrors) == 1 && runErr != tc.wantErrors[0] {
+						t.Errorf("run error = %v, want original error %v unchanged", runErr, tc.wantErrors[0])
+					}
+					for _, wantErr := range tc.wantErrors {
+						if !errors.Is(runErr, wantErr) {
+							t.Errorf("run error = %v, missing error %v", runErr, wantErr)
+						}
+					}
+					if got := toolCalls.Load(); got != tc.wantTools {
+						t.Errorf("tool calls = %d, want %d", got, tc.wantTools)
+					}
+					if providerCalls != tc.wantProviders {
+						t.Errorf("provider calls = %d, want %d", providerCalls, tc.wantProviders)
+					}
+				})
+			})
+		}
+	}
 }

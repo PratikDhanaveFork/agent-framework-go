@@ -668,10 +668,31 @@ func (p *provider) assistantMessageUpdate(event copilot.SessionEvent, data *copi
 			ContentHeader: message.ContentHeader{RawRepresentation: event},
 		}}
 	} else {
-		update.Contents = []message.Content{&message.TextContent{
+		textContent := &message.TextContent{
 			ContentHeader: message.ContentHeader{RawRepresentation: event},
 			Text:          data.Content,
-		}}
+		}
+		// Surface native model citations (enabled via AgentConfig.EnableCitations)
+		// as CitationAnnotations, mirroring the OpenAI chat/Responses providers.
+		if data.Citations != nil {
+			for _, source := range data.Citations.Sources {
+				fileID := firstNonNilString(source.Path)
+				title := firstNonNilString(source.Title)
+				url := firstNonNilString(source.URL)
+				// Skip sources with no usable fields so we do not emit an empty
+				// annotation, matching the filtering other providers apply.
+				if fileID == "" && title == "" && url == "" {
+					continue
+				}
+				textContent.Annotations = append(textContent.Annotations, &message.CitationAnnotation{
+					FileID:            fileID,
+					Title:             title,
+					URL:               url,
+					RawRepresentation: source,
+				})
+			}
+		}
+		update.Contents = []message.Content{textContent}
 		if data.ReasoningText != nil {
 			update.Contents = append(update.Contents, &message.TextReasoningContent{
 				ContentHeader: message.ContentHeader{RawRepresentation: event},

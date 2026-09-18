@@ -877,3 +877,38 @@ func TestHandler_URIContentEmittedAsText(t *testing.T) {
 		t.Fatalf("expected URIContent URI surfaced in SSE payload, got %q", content)
 	}
 }
+
+func TestHandler_TextThenToolCall_ClosesTextBeforeToolLifecycle(t *testing.T) {
+	a := newTestAgent(func(_ context.Context, _ []*message.Message, _ ...agent.Option) iter.Seq2[*agent.ResponseUpdate, error] {
+		return func(yield func(*agent.ResponseUpdate, error) bool) {
+			yield(&agent.ResponseUpdate{
+				MessageID: "m1",
+				Role:      message.RoleAssistant,
+				Contents:  message.Contents{&message.TextContent{Text: "Let me check."}},
+			}, nil)
+			yield(&agent.ResponseUpdate{
+				MessageID: "m1",
+				Role:      message.RoleAssistant,
+				Contents:  message.Contents{&message.FunctionCallContent{CallID: "call-1", Name: "get_weather", Arguments: "{}"}},
+			}, nil)
+		}
+	})
+	h := aguiprovider.NewJSONHTTPHandler(a, aguiprovider.HandlerConfig{})
+
+	body := `{"threadId":"thread-1","runId":"run-1","messages":[{"id":"u1","role":"user","content":"ping"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	lifecycle := eventsWithPrefixes(decodeSSEEvents(t, rr.Body.String()), "TEXT_MESSAGE_", "TOOL_CALL_")
+	// The text message lifecycle must be fully closed before the tool-call
+	// lifecycle opens, rather than the tool call nesting inside an open message.
+	assertEventTypes(t, lifecycle, []string{
+		"TEXT_MESSAGE_START",
+		"TEXT_MESSAGE_CONTENT",
+		"TEXT_MESSAGE_END",
+		"TOOL_CALL_START",
+		"TOOL_CALL_ARGS",
+		"TOOL_CALL_END",
+	})
+}
