@@ -876,7 +876,11 @@ func buildMessageParam(msg *message.Message) (anthropic.MessageParam, error) {
 	for _, c := range msg.Contents {
 		switch c := c.(type) {
 		case *message.TextContent:
-			content = append(content, anthropic.NewTextBlock(c.Text))
+			// Anthropic rejects empty text blocks, so skip them (the system
+			// path applies the same guard).
+			if c.Text != "" {
+				content = append(content, anthropic.NewTextBlock(c.Text))
+			}
 		case *message.TextReasoningContent:
 			// Replay a prior assistant thinking block so its signature travels
 			// back with the request (Anthropic emits reasoning before the rest of

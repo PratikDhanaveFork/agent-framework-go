@@ -1168,6 +1168,27 @@ func TestAssistantUnsignedReasoningIsSkipped(t *testing.T) {
 	}
 }
 
+// Anthropic rejects empty text blocks, so a TextContent with no text must not be
+// forwarded. The system path already guards this; the message path must too,
+// matching the Python client which skips empty text blocks.
+func TestEmptyTextContentIsSkipped(t *testing.T) {
+	msgs := []*message.Message{
+		{Role: message.RoleUser, Contents: message.Contents{&message.TextContent{Text: "hi"}}},
+		{Role: message.RoleAssistant, Contents: message.Contents{
+			&message.TextContent{Text: ""},
+			&message.TextContent{Text: "hello"},
+		}},
+	}
+
+	blocks := assistantBlocksFromRequest(t, msgs)
+	if len(blocks) != 1 {
+		t.Fatalf("assistant content blocks = %d, want 1 (empty text block should be skipped) (%#v)", len(blocks), blocks)
+	}
+	if blocks[0]["type"] != "text" || blocks[0]["text"] != "hello" {
+		t.Errorf("block = %#v, want a text block %q", blocks[0], "hello")
+	}
+}
+
 // The tool's input_schema sent to Anthropic must carry the additionalProperties
 // keyword emitted by functool's strict schema. functool.Call validates decoded
 // arguments against the resolved schema (additionalProperties:false), so if the
