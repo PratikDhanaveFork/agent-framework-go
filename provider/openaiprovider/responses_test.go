@@ -7837,3 +7837,21 @@ data: {"type":"response.completed","sequence_number":3,"response":{"id":"resp_00
 		t.Fatalf("output = %#v, want DataContent with the image", result.Outputs[0])
 	}
 }
+
+func TestResponsesFunctionCallUsesToolCallsFinishReason_NonStreaming(t *testing.T) {
+	const input = `{
+		"model":"gpt-4o-mini",
+		"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"test"}]}]
+	}`
+	const output = `{"id":"resp_tool","object":"response","created_at":1741892091,"status":"completed","model":"gpt-4o-mini","output":[{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":"{}"}]}`
+
+	server := newTestResponsesServer(t, input, output)
+	defer server.Close()
+	resp, err := newTestResponsesClient(server, "gpt-4o-mini").RunText(t.Context(), "test").Collect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.FinishReason != "tool_calls" {
+		t.Fatalf("FinishReason = %q, want tool_calls", resp.FinishReason)
+	}
+}
