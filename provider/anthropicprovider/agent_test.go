@@ -530,6 +530,82 @@ func TestCharacterLocationCitationsBecomeAnnotatedRegions(t *testing.T) {
 	}
 }
 
+// citationRegionFromResponse runs the agent against a server returning a single
+// text block whose citation is the given JSON object, then returns the decoded
+// text-span region of that citation.
+func citationRegionFromResponse(t *testing.T, citationJSON string) *message.TextSpanAnnotatedRegion {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+			"id":"msg_region_citation",
+			"type":"message",
+			"role":"assistant",
+			"model":"claude-3-5-sonnet-20241022",
+			"stop_reason":"end_turn",
+			"content":[{
+				"type":"text",
+				"text":"The answer cites a document.",
+				"citations":[`+citationJSON+`]
+			}],
+			"usage":{"input_tokens":10,"output_tokens":5}
+		}`)
+	}))
+	defer server.Close()
+
+	resp, err := newTestClient(t, server).RunText(t.Context(), "cite something").Collect()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var citation *message.CitationAnnotation
+	for content := range resp.Contents() {
+		if text, ok := content.(*message.TextContent); ok && len(text.Annotations) > 0 {
+			citation, _ = text.Annotations[0].(*message.CitationAnnotation)
+		}
+	}
+	if citation == nil || len(citation.AnnotatedRegions) != 1 {
+		t.Fatalf("citation = %#v", citation)
+	}
+	span, ok := citation.AnnotatedRegions[0].(*message.TextSpanAnnotatedRegion)
+	if !ok {
+		t.Fatalf("annotated region = %#v, want a text span", citation.AnnotatedRegions[0])
+	}
+	return span
+}
+
+// Page-location citations carry PDF page numbers rather than character offsets;
+// they must still surface as a text-span region, matching the Python client.
+func TestPageLocationCitationsBecomeAnnotatedRegions(t *testing.T) {
+	span := citationRegionFromResponse(t, `{
+		"type":"page_location",
+		"cited_text":"page excerpt",
+		"document_index":0,
+		"document_title":"Document",
+		"start_page_number":3,
+		"end_page_number":5
+	}`)
+	if span.StartIndex == nil || *span.StartIndex != 3 || span.EndIndex == nil || *span.EndIndex != 5 {
+		t.Fatalf("annotated region = %#v, want [3, 5)", span)
+	}
+}
+
+// Content-block-location citations carry block indices; they must also surface
+// as a text-span region.
+func TestContentBlockLocationCitationsBecomeAnnotatedRegions(t *testing.T) {
+	span := citationRegionFromResponse(t, `{
+		"type":"content_block_location",
+		"cited_text":"block excerpt",
+		"document_index":0,
+		"document_title":"Document",
+		"start_block_index":1,
+		"end_block_index":4
+	}`)
+	if span.StartIndex == nil || *span.StartIndex != 1 || span.EndIndex == nil || *span.EndIndex != 4 {
+		t.Fatalf("annotated region = %#v, want [1, 4)", span)
+	}
+}
+
 func TestHostedServerToolContents(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

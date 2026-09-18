@@ -555,8 +555,22 @@ func citationAnnotations(citations []anthropic.TextCitationUnion) []message.Anno
 	var annotations []message.Annotation
 	for _, citation := range citations {
 		var regions message.AnnotatedRegions
-		if citation.Type == "char_location" {
+		// Anthropic reports the cited span differently per location type:
+		// character offsets, PDF page numbers, or content-block indices. Map
+		// each to a text-span region, matching the Python client.
+		switch citation.Type {
+		case "char_location":
 			startIndex, endIndex := int(citation.StartCharIndex), int(citation.EndCharIndex)
+			regions = message.AnnotatedRegions{
+				&message.TextSpanAnnotatedRegion{StartIndex: &startIndex, EndIndex: &endIndex},
+			}
+		case "page_location":
+			startIndex, endIndex := int(citation.StartPageNumber), int(citation.EndPageNumber)
+			regions = message.AnnotatedRegions{
+				&message.TextSpanAnnotatedRegion{StartIndex: &startIndex, EndIndex: &endIndex},
+			}
+		case "content_block_location":
+			startIndex, endIndex := int(citation.StartBlockIndex), int(citation.EndBlockIndex)
 			regions = message.AnnotatedRegions{
 				&message.TextSpanAnnotatedRegion{StartIndex: &startIndex, EndIndex: &endIndex},
 			}
