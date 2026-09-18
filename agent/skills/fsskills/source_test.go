@@ -707,6 +707,32 @@ func createSymlink(t *testing.T, linkPath, targetPath string) {
 	}
 }
 
+func TestFileSource_MetadataWithBlankLineCRLF_KeepsAllKeys(t *testing.T) {
+	root := t.TempDir()
+	createSkillDirRaw(t, root, "gap-meta-crlf", strings.Join([]string{
+		"---",
+		"name: gap-meta-crlf",
+		"description: d",
+		"metadata:",
+		"  a: 1",
+		"",
+		"  b: 2",
+		"  c: 3",
+		"---",
+		"Body.",
+	}, "\r\n"))
+
+	source := fsskills.NewSource(os.DirFS(root))
+	loaded, err := source.Skills(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := loaded[0].Frontmatter.Metadata
+	if m["a"] != "1" || m["b"] != "2" || m["c"] != "3" {
+		t.Fatalf("CRLF metadata keys dropped after blank line: %#v", m)
+	}
+}
+
 func TestFileSource_MetadataWithBlankLine_KeepsAllKeys(t *testing.T) {
 	root := t.TempDir()
 	createSkillDirRaw(t, root, "gap-meta", strings.Join([]string{

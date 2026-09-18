@@ -37,7 +37,7 @@ var (
 var (
 	frontmatterRegex          = regexp.MustCompile(`(?ms)\A^---\s*$(.+?)^---\s*$`)
 	yamlKeyValueRegex         = regexp.MustCompile(`(?m)^([\w-]+)\s*:\s*(?:["'](.+?)["']|(.+?))\s*$`)
-	yamlMetadataBlockRegex    = regexp.MustCompile(`(?m)^metadata\s*:\s*$\n((?:[ \t]+\S.*\n?|[ \t]*\n)+)`)
+	yamlMetadataBlockRegex    = regexp.MustCompile(`(?m)^metadata\s*:\s*$\n((?:[ \t]+\S.*\n?|[ \t]*\r?\n)+)`)
 	yamlIndentedKeyValueRegex = regexp.MustCompile(`(?m)^\s+([\w-]+)\s*:\s*(?:["'](.+?)["']|(.+?))\s*$`)
 )
 
