@@ -201,6 +201,32 @@ func TestHandler_StateSnapshotEmitsStateEvent(t *testing.T) {
 	}
 }
 
+// UsageContent must be surfaced as a "usage" CUSTOM event rather than dropped,
+// matching the Python host.
+func TestHandler_UsageContentEmitsCustomEvent(t *testing.T) {
+	a := newTestAgent(func(_ context.Context, _ []*message.Message, _ ...agent.Option) iter.Seq2[*agent.ResponseUpdate, error] {
+		return func(yield func(*agent.ResponseUpdate, error) bool) {
+			yield(&agent.ResponseUpdate{
+				Role: message.RoleAssistant,
+				Contents: message.Contents{&message.UsageContent{
+					Details: message.UsageDetails{InputTokenCount: 10, OutputTokenCount: 5, TotalTokenCount: 15},
+				}},
+			}, nil)
+		}
+	})
+	h := aguiprovider.NewJSONHTTPHandler(a, aguiprovider.HandlerConfig{})
+
+	body := `{"threadId":"thread-1","runId":"run-1","messages":[{"id":"u1","role":"user","content":"ping"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	content := rr.Body.String()
+	if !strings.Contains(content, "CUSTOM") || !strings.Contains(content, `"usage"`) {
+		t.Fatalf("expected a usage CUSTOM event, got %q", content)
+	}
+}
+
 func TestHandler_MixedToolInvocations_SuppressesServerToolResults(t *testing.T) {
 	a := newTestAgent(func(_ context.Context, _ []*message.Message, _ ...agent.Option) iter.Seq2[*agent.ResponseUpdate, error] {
 		return func(yield func(*agent.ResponseUpdate, error) bool) {
