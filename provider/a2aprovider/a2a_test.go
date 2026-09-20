@@ -300,6 +300,30 @@ func TestRunAllowsNonUserRoleMessages(t *testing.T) {
 }
 
 // TestRunWithValidUserMessage tests successful run with valid user message
+// A response message carrying the A2A user role must map to RoleUser, not be
+// hardcoded to assistant, matching the Python client.
+func TestRunPreservesInboundUserRole(t *testing.T) {
+	transport := &mockA2ATransport{
+		responseToReturn: &a2a.Message{
+			ID:    "m1",
+			Role:  a2a.MessageRoleUser,
+			Parts: a2a.ContentParts{a2a.NewTextPart("hi")},
+		},
+	}
+	a := newTestAgent(transport, agent.Config{})
+
+	result, err := a.RunText(t.Context(), "hello").Collect()
+	if err != nil {
+		t.Fatalf("error = %v, want nil", err)
+	}
+	if len(result.Messages) != 1 {
+		t.Fatalf("len(result.Messages) = %d, want 1", len(result.Messages))
+	}
+	if result.Messages[0].Role != message.RoleUser {
+		t.Errorf("Role = %q, want %q", result.Messages[0].Role, message.RoleUser)
+	}
+}
+
 func TestRunWithValidUserMessage(t *testing.T) {
 	transport := &mockA2ATransport{
 		responseToReturn: &a2a.Message{
