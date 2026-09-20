@@ -253,7 +253,11 @@ func mapStopReason(reason anthropic.StopReason) string {
 	case anthropic.StopReasonRefusal:
 		return "content_filter"
 	default:
-		return ""
+		// Pass through stop reasons we don't explicitly map (e.g. a newer
+		// value like model_context_window_exceeded) so they still reach the
+		// caller instead of being reported as no finish reason, matching the
+		// Python client. An empty reason maps to "".
+		return string(reason)
 	}
 }
 
