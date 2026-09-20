@@ -485,6 +485,31 @@ func TestConvertToAgentResponseUpdate_UsageEvent_SurfacesReasoningTokens(t *test
 	}
 }
 
+// A content-filter-triggered usage event must report the canonical
+// "content_filter" finish reason, taking precedence over the raw finishReason,
+// matching the Python client.
+func TestConvertToAgentResponseUpdate_UsageEvent_ContentFilterTriggeredMapsFinishReason(t *testing.T) {
+	runtime := newFakeRuntime(t,
+		sessionEvent("assistant.usage", map[string]any{
+			"model":                  "claude-sonnet-4",
+			"inputTokens":            10,
+			"outputTokens":           0,
+			"finishReason":           "stop",
+			"contentFilterTriggered": true,
+		}),
+		idleEvent(),
+	)
+	agent := copilotprovider.NewAgent(runtime.client(), copilotprovider.AgentConfig{})
+
+	response, err := runText(t, agent, "hello")
+	if err != nil {
+		t.Fatalf("RunText: %v", err)
+	}
+	if response.FinishReason != "content_filter" {
+		t.Fatalf("FinishReason = %q, want content_filter", response.FinishReason)
+	}
+}
+
 func TestConvertToAgentResponseUpdate_ReasoningEvent_SurfacesReasoningContent(t *testing.T) {
 	const thinking = "Let me work through this step by step."
 	runtime := newFakeRuntime(t,
