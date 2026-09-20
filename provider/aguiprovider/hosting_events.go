@@ -296,8 +296,15 @@ func contentToEvents(content message.Content, messageID string) ([]aguiEvents.Ev
 		if args == "" {
 			args = "{}"
 		}
+		// Associate the tool call with its assistant message so the client does
+		// not create a separate assistant message per tool call (see the
+		// coalescing workaround in toAgentMessages). Matches the Python host.
+		var startOpts []aguiEvents.ToolCallStartOption
+		if messageID != "" {
+			startOpts = append(startOpts, aguiEvents.WithParentMessageID(messageID))
+		}
 		return []aguiEvents.Event{
-			aguiEvents.NewToolCallStartEvent(callID, c.Name),
+			aguiEvents.NewToolCallStartEvent(callID, c.Name, startOpts...),
 			aguiEvents.NewToolCallArgsEvent(callID, args),
 			aguiEvents.NewToolCallEndEvent(callID),
 		}, nil
