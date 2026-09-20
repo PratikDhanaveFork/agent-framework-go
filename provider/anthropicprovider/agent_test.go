@@ -606,6 +606,60 @@ func TestContentBlockLocationCitationsBecomeAnnotatedRegions(t *testing.T) {
 	}
 }
 
+// search_result_location citations carry a block-index region and put their
+// link in the source field (not url); both must be surfaced, matching Python.
+func TestSearchResultLocationCitationsSurfaceRegionAndSource(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+			"id":"msg_search_citation",
+			"type":"message",
+			"role":"assistant",
+			"model":"claude-3-5-sonnet-20241022",
+			"stop_reason":"end_turn",
+			"content":[{
+				"type":"text",
+				"text":"The answer cites a search result.",
+				"citations":[{
+					"type":"search_result_location",
+					"cited_text":"search excerpt",
+					"title":"Result",
+					"source":"https://example.com/result",
+					"start_block_index":1,
+					"end_block_index":3
+				}]
+			}],
+			"usage":{"input_tokens":10,"output_tokens":5}
+		}`)
+	}))
+	defer server.Close()
+
+	resp, err := newTestClient(t, server).RunText(t.Context(), "cite something").Collect()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var citation *message.CitationAnnotation
+	for content := range resp.Contents() {
+		if text, ok := content.(*message.TextContent); ok && len(text.Annotations) > 0 {
+			citation, _ = text.Annotations[0].(*message.CitationAnnotation)
+		}
+	}
+	if citation == nil {
+		t.Fatal("no citation annotation surfaced")
+	}
+	if citation.URL != "https://example.com/result" {
+		t.Errorf("URL = %q, want the source link", citation.URL)
+	}
+	if len(citation.AnnotatedRegions) != 1 {
+		t.Fatalf("regions = %#v, want one text-span region", citation.AnnotatedRegions)
+	}
+	span, ok := citation.AnnotatedRegions[0].(*message.TextSpanAnnotatedRegion)
+	if !ok || span.StartIndex == nil || *span.StartIndex != 1 || span.EndIndex == nil || *span.EndIndex != 3 {
+		t.Fatalf("annotated region = %#v, want [1, 3)", citation.AnnotatedRegions[0])
+	}
+}
+
 func TestHostedServerToolContents(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
