@@ -242,10 +242,15 @@ func (p *MemoryProvider) staticMemories(ctx context.Context, session *agent.Sess
 	if session == nil {
 		return nil
 	}
+	// Key the cache by store and scope so a session shared across providers, or
+	// a scope callback whose result changes between turns, does not reuse the
+	// wrong scope's static memories.
+	initKey := p.staticStateKey(memoryStaticInitStateKey, scope)
+	memKey := p.staticStateKey(memoryStaticMemoriesStateKey, scope)
 	var initialized bool
-	if ok, _ := session.Get(memoryStaticInitStateKey, &initialized); ok && initialized {
+	if ok, _ := session.Get(initKey, &initialized); ok && initialized {
 		var cached []string
-		session.Get(memoryStaticMemoriesStateKey, &cached)
+		session.Get(memKey, &cached)
 		return cached
 	}
 	result, err := p.client.SearchMemories(ctx, p.memoryStoreName, scope, &azaiprojects.MemoryStoresClientSearchMemoriesOptions{
@@ -257,9 +262,15 @@ func (p *MemoryProvider) staticMemories(ctx context.Context, session *agent.Sess
 		return nil
 	}
 	static := memoryContents(result.Memories)
-	session.Set(memoryStaticMemoriesStateKey, static)
-	session.Set(memoryStaticInitStateKey, true)
+	session.Set(memKey, static)
+	session.Set(initKey, true)
 	return static
+}
+
+// staticStateKey qualifies a static-memory session-state key with the store and
+// scope so cached state is not shared across providers or scopes on one session.
+func (p *MemoryProvider) staticStateKey(prefix, scope string) string {
+	return prefix + ":" + p.memoryStoreName + ":" + scope
 }
 
 func (p *MemoryProvider) store(ctx context.Context, invoked agent.InvokedContext) error {

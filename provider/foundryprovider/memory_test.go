@@ -187,8 +187,10 @@ func TestMemoryProviderInjectsStaticMemories(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Invoking error = %v", err)
 	}
-	if ctx := messagesString(messages); !strings.Contains(ctx, "static profile") || !strings.Contains(ctx, "contextual memory") {
-		t.Fatalf("first-turn context = %q, want static + contextual", ctx)
+	// Static memories are prepended before the contextual ones, so assert order,
+	// not just presence.
+	if ctx := messagesString(messages); !strings.Contains(ctx, "static profile\ncontextual memory") {
+		t.Fatalf("first-turn context = %q, want static memory prepended before contextual", ctx)
 	}
 
 	// Second turn: static is cached, so no second item-less search is issued,
