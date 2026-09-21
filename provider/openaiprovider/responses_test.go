@@ -5284,6 +5284,47 @@ data: {"type":"response.completed","sequence_number":4,"response":{"id":"resp_00
 	}
 }
 
+// With no partial_image event, the finished image is emitted from
+// output_item.done and its media type must follow the call's output_format.
+func TestResponsesStreamingImageGenerationCall_NoPartial_UsesOutputFormat(t *testing.T) {
+	const imageBase64 = "iVBORw0KGgo="
+	const input = `{"model":"gpt-4o-mini","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"draw"}]}],"stream":true}`
+	const output = `event: response.created
+data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_002","object":"response","created_at":1741892091,"status":"in_progress","model":"gpt-4o-mini","output":[]}}
+
+event: response.image_generation_call.in_progress
+data: {"type":"response.image_generation_call.in_progress","sequence_number":1,"output_index":0,"item_id":"ig_np"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","sequence_number":2,"output_index":0,"item":{"type":"image_generation_call","id":"ig_np","status":"completed","output_format":"webp","result":"` + imageBase64 + `"}}
+
+event: response.completed
+data: {"type":"response.completed","sequence_number":3,"response":{"id":"resp_002","object":"response","created_at":1741892091,"status":"completed","model":"gpt-4o-mini","output":[]}}
+
+`
+
+	server := newTestResponsesServerStreaming(t, input, output)
+	defer server.Close()
+
+	var image *message.DataContent
+	for update, err := range newTestResponsesClient(server, "gpt-4o-mini").RunText(t.Context(), "draw", agent.Stream(true)) {
+		if err != nil {
+			t.Fatalf("error = %v", err)
+		}
+		for _, content := range update.Contents {
+			if r, ok := content.(*message.ImageGenerationToolResultContent); ok && len(r.Outputs) == 1 {
+				image, _ = r.Outputs[0].(*message.DataContent)
+			}
+		}
+	}
+	if image == nil {
+		t.Fatal("no image data content surfaced from output_item.done")
+	}
+	if image.MediaType != "image/webp" {
+		t.Errorf("MediaType = %q, want image/webp", image.MediaType)
+	}
+}
+
 func TestResponsesNonStreamingWebSearchCall_MapsToToolContents(t *testing.T) {
 	const input = `
             {
