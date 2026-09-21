@@ -832,9 +832,13 @@ func (p *provider) assistantUsageUpdate(event copilot.SessionEvent, data *copilo
 		update.FinishReason = *data.FinishReason
 	}
 	// Surface which model actually served the request, matching the Python
-	// client which carries it as additional_properties["model"].
+	// client which carries it as additional_properties["model"]. Initialize the
+	// map lazily so existing/future properties are not overwritten.
 	if data.Model != "" {
-		update.AdditionalProperties = map[string]any{"model": data.Model}
+		if update.AdditionalProperties == nil {
+			update.AdditionalProperties = make(map[string]any)
+		}
+		update.AdditionalProperties["model"] = data.Model
 	}
 	return update
 }
