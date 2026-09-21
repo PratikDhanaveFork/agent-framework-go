@@ -428,7 +428,7 @@ func TestChatBasicRequestResponse_NonStreaming(t *testing.T) {
 	}
 }
 
-// cache_write_tokens (prompt-cache misses) must be surfaced via AdditionalCounts,
+// cache_write_tokens (prompt-cache writes / cache creation) must be surfaced via AdditionalCounts,
 // matching the Python client.
 func TestChatCacheWriteTokensSurfaced(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
