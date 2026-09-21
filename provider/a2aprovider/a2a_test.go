@@ -299,7 +299,6 @@ func TestRunAllowsNonUserRoleMessages(t *testing.T) {
 	}
 }
 
-// TestRunWithValidUserMessage tests successful run with valid user message
 // An ErrorContent must be sent to A2A as its human-readable text, not as an
 // opaque JSON blob (the default-branch behavior), matching the Python client.
 func TestRunSendsErrorContentAsText(t *testing.T) {
@@ -329,6 +328,7 @@ func TestRunSendsErrorContentAsText(t *testing.T) {
 	}
 }
 
+// TestRunWithValidUserMessage tests successful run with valid user message.
 func TestRunWithValidUserMessage(t *testing.T) {
 	transport := &mockA2ATransport{
 		responseToReturn: &a2a.Message{
