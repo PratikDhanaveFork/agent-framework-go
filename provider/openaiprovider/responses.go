@@ -1326,15 +1326,22 @@ func responsesUsageToContent(usage responses.ResponseUsage) *message.UsageConten
 	if usage.InputTokens == 0 && usage.OutputTokens == 0 {
 		return nil
 	}
-	return &message.UsageContent{
-		Details: message.UsageDetails{
-			InputTokenCount:       usage.InputTokens,
-			OutputTokenCount:      usage.OutputTokens,
-			TotalTokenCount:       usage.TotalTokens,
-			CachedInputTokenCount: usage.InputTokensDetails.CachedTokens,
-			ReasoningTokenCount:   usage.OutputTokensDetails.ReasoningTokens,
-		},
+	details := message.UsageDetails{
+		InputTokenCount:       usage.InputTokens,
+		OutputTokenCount:      usage.OutputTokens,
+		TotalTokenCount:       usage.TotalTokens,
+		CachedInputTokenCount: usage.InputTokensDetails.CachedTokens,
+		ReasoningTokenCount:   usage.OutputTokensDetails.ReasoningTokens,
 	}
+	// UsageDetails has no first-class cache-creation field, so surface cache
+	// write tokens (prompt-cache misses) via AdditionalCounts, matching the
+	// Python client.
+	if usage.InputTokensDetails.CacheWriteTokens > 0 {
+		details.AdditionalCounts = map[string]int64{
+			"InputTokensDetails.CacheWriteTokens": usage.InputTokensDetails.CacheWriteTokens,
+		}
+	}
+	return &message.UsageContent{Details: details}
 }
 
 const (
