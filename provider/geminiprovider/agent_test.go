@@ -2568,10 +2568,6 @@ func TestFinishReason_Streaming(t *testing.T) {
 	}
 }
 
-// TestHostedTools_MappedToGenaiTools verifies that hosted tools attached via
-// agent.WithTool are mapped onto their native genai.Tool entries in the outgoing
-// request. Before this mapping, non-FuncTool options were silently dropped and
-// the request carried no tools at all.
 // On the Developer API, combining a function tool with a server-side (native)
 // tool must set toolConfig.includeServerSideToolInvocations so Gemini echoes its
 // server-side tool interactions. It must not be set when there are no function
@@ -2614,6 +2610,10 @@ func TestIncludeServerSideToolInvocations(t *testing.T) {
 	}
 }
 
+// TestHostedTools_MappedToGenaiTools verifies that hosted tools attached via
+// agent.WithTool are mapped onto their native genai.Tool entries in the outgoing
+// request. Before this mapping, non-FuncTool options were silently dropped and
+// the request carried no tools at all.
 func TestHostedTools_MappedToGenaiTools(t *testing.T) {
 	tests := []struct {
 		name    string
