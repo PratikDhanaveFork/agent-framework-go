@@ -190,6 +190,45 @@ func TestResponsesOutputTextLogprobsSurfaced_NonStreaming(t *testing.T) {
 	}
 }
 
+// The streaming output_item.done path must also surface output_text logprobs on
+// the emitted text content.
+func TestResponsesOutputTextLogprobsSurfaced_Streaming(t *testing.T) {
+	const input = `{"model":"gpt-4o-mini","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],"stream":true}`
+	const output = `event: response.created
+data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_lp","object":"response","created_at":1741891428,"status":"in_progress","model":"gpt-4o-mini","output":[]}}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":1,"item_id":"msg_lp","output_index":0,"content_index":0,"delta":"hello"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","sequence_number":2,"output_index":0,"item":{"type":"message","id":"msg_lp","status":"completed","role":"assistant","content":[{"type":"output_text","text":"hello","annotations":[],"logprobs":[{"token":"hello","logprob":-0.05,"bytes":[104],"top_logprobs":[]}]}]}}
+
+event: response.completed
+data: {"type":"response.completed","sequence_number":3,"response":{"id":"resp_lp","object":"response","created_at":1741891428,"status":"completed","model":"gpt-4o-mini","output":[]}}
+
+`
+
+	server := newTestResponsesServerStreaming(t, input, output)
+	defer server.Close()
+
+	var withLogprobs *message.TextContent
+	for update, err := range newTestResponsesClient(server, "gpt-4o-mini").RunText(t.Context(), "hi", agent.Stream(true)) {
+		if err != nil {
+			t.Fatalf("error = %v", err)
+		}
+		for _, content := range update.Contents {
+			if tc, ok := content.(*message.TextContent); ok {
+				if _, ok := tc.AdditionalProperties["Logprobs"]; ok {
+					withLogprobs = tc
+				}
+			}
+		}
+	}
+	if withLogprobs == nil {
+		t.Fatal("no streamed TextContent carried Logprobs from output_item.done")
+	}
+}
+
 func TestNewAgentCurrentlyUsesResponsesAPI(t *testing.T) {
 	const input = `
 			{
