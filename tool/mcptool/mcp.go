@@ -437,7 +437,10 @@ func agentContentToMCPContent(contentValue message.Content) mcp.Content {
 		}
 	case *message.URIContent:
 		if c != nil {
-			return &mcp.ResourceLink{URI: c.URI, MIMEType: c.MediaType, Meta: maps.Clone(c.AdditionalProperties)}
+			// MCP requires a non-empty resource-link name; URIContent has none,
+			// so default it to the URI (as the embedded-resource path already
+			// does), rather than emitting an empty required field.
+			return &mcp.ResourceLink{Name: c.URI, URI: c.URI, MIMEType: c.MediaType, Meta: maps.Clone(c.AdditionalProperties)}
 		}
 	}
 	var meta mcp.Meta
