@@ -2572,6 +2572,59 @@ func TestFinishReason_Streaming(t *testing.T) {
 // agent.WithTool are mapped onto their native genai.Tool entries in the outgoing
 // request. Before this mapping, non-FuncTool options were silently dropped and
 // the request carried no tools at all.
+// Consecutive tool-role messages (e.g. accepted and rejected tool results from
+// the approval path) must be coalesced into a single user content carrying all
+// function responses, matching the Python client and Gemini's turn structure.
+func TestConsecutiveToolMessagesCoalesced(t *testing.T) {
+	bodyCh := make(chan []byte, 1)
+	server := httptest.NewServer(captureAndRespond(t, bodyCh, "application/json", minimalTextResponse("ok")))
+	defer server.Close()
+
+	msgs := []*message.Message{
+		{Role: message.RoleUser, Contents: message.Contents{&message.TextContent{Text: "call tools"}}},
+		{Role: message.RoleAssistant, Contents: message.Contents{
+			&message.FunctionCallContent{CallID: "c1", Name: "get_a", Arguments: "{}"},
+			&message.FunctionCallContent{CallID: "c2", Name: "get_b", Arguments: "{}"},
+		}},
+		{Role: message.RoleTool, Contents: message.Contents{&message.FunctionResultContent{CallID: "c1", Result: "ra"}}},
+		{Role: message.RoleTool, Contents: message.Contents{&message.FunctionResultContent{CallID: "c2", Result: "rb"}}},
+	}
+	if _, err := newTestClient(t, server).Run(t.Context(), msgs).Collect(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var req map[string]any
+	if err := json.Unmarshal(<-bodyCh, &req); err != nil {
+		t.Fatalf("unmarshal request body: %v", err)
+	}
+	contents, _ := req["contents"].([]any)
+	// Count contents that carry function responses.
+	var funcRespContents int
+	var totalFuncResps int
+	for _, cAny := range contents {
+		c, _ := cAny.(map[string]any)
+		parts, _ := c["parts"].([]any)
+		has := 0
+		for _, pAny := range parts {
+			if p, ok := pAny.(map[string]any); ok {
+				if _, ok := p["functionResponse"]; ok {
+					has++
+				}
+			}
+		}
+		if has > 0 {
+			funcRespContents++
+			totalFuncResps += has
+		}
+	}
+	if funcRespContents != 1 {
+		t.Errorf("function responses spread across %d contents, want 1 coalesced content", funcRespContents)
+	}
+	if totalFuncResps != 2 {
+		t.Errorf("total function responses = %d, want 2", totalFuncResps)
+	}
+}
+
 func TestHostedTools_MappedToGenaiTools(t *testing.T) {
 	tests := []struct {
 		name    string

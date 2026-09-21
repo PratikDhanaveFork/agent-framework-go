@@ -349,11 +349,23 @@ func (a *client) buildParams(messages []*message.Message, opts []agent.Option) (
 		}
 	}
 
-	// Build contents from messages.
+	// Build contents from messages. Consecutive tool-role messages (e.g. the
+	// tool-approval path emits accepted and rejected results as separate
+	// messages) are coalesced into a single user content, since Gemini expects
+	// the function responses answering one model turn in one content. This
+	// mirrors the Python client's pending-tool-parts accumulation.
 	var contents []*genai.Content
+	var pendingToolParts []*genai.Part
+	flushToolParts := func() {
+		if len(pendingToolParts) > 0 {
+			contents = append(contents, &genai.Content{Role: genai.RoleUser, Parts: pendingToolParts})
+			pendingToolParts = nil
+		}
+	}
 	for _, msg := range messages {
 		switch msg.Role {
 		case message.RoleSystem:
+			flushToolParts()
 			// Gemini uses a single system instruction content that can hold multiple parts.
 			// Add each non-empty system text content as its own part.
 			for _, c := range msg.Contents {
@@ -361,7 +373,14 @@ func (a *client) buildParams(messages []*message.Message, opts []agent.Option) (
 					appendSystemInstruction(cfg, tc.Text)
 				}
 			}
-		case message.RoleUser, message.RoleTool:
+		case message.RoleTool:
+			parts, err := buildRequestParts(msg, callIDToName)
+			if err != nil {
+				return nil, nil, err
+			}
+			pendingToolParts = append(pendingToolParts, parts...)
+		case message.RoleUser:
+			flushToolParts()
 			parts, err := buildRequestParts(msg, callIDToName)
 			if err != nil {
 				return nil, nil, err
@@ -373,6 +392,7 @@ func (a *client) buildParams(messages []*message.Message, opts []agent.Option) (
 				})
 			}
 		case message.RoleAssistant:
+			flushToolParts()
 			parts, err := buildRequestParts(msg, callIDToName)
 			if err != nil {
 				return nil, nil, err
@@ -387,6 +407,7 @@ func (a *client) buildParams(messages []*message.Message, opts []agent.Option) (
 			return nil, nil, fmt.Errorf("geminiprovider: unsupported message role %q", msg.Role)
 		}
 	}
+	flushToolParts()
 
 	return contents, cfg, nil
 }
