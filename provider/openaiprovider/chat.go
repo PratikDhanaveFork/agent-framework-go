@@ -191,6 +191,10 @@ func (a *chatClient) run(ctx context.Context, messages []*message.Message, optio
 		stream := a.client.Chat.Completions.NewStreaming(ctx, body, telemetryRequestOption)
 		defer func() { _ = stream.Close() }()
 		var acc openai.ChatCompletionAccumulator
+		// Logprobs stream incrementally (one chunk carries only its own tokens),
+		// so accumulate them across chunks; each update carries the running total
+		// and the final message keeps the complete per-choice list.
+		var accLogprobs openai.ChatCompletionChunkChoiceLogprobs
 		for stream.Next() {
 			chunk := stream.Current()
 			if !acc.AddChunk(chunk) {
@@ -223,8 +227,12 @@ func (a *chatClient) run(ctx context.Context, messages []*message.Message, optio
 			if len(chunk.Choices) > 0 {
 				finishReason = chunk.Choices[0].FinishReason
 				if logprobs := chunk.Choices[0].Logprobs; len(logprobs.Content) > 0 || len(logprobs.Refusal) > 0 {
-					additionalProperties = map[string]any{"Logprobs": logprobs}
+					accLogprobs.Content = append(accLogprobs.Content, logprobs.Content...)
+					accLogprobs.Refusal = append(accLogprobs.Refusal, logprobs.Refusal...)
 				}
+			}
+			if len(accLogprobs.Content) > 0 || len(accLogprobs.Refusal) > 0 {
+				additionalProperties = map[string]any{"Logprobs": accLogprobs}
 			}
 			if chunk.SystemFingerprint != "" {
 				if additionalProperties == nil {

@@ -469,6 +469,31 @@ func TestChatResponseMetadataSurfaced_Streaming(t *testing.T) {
 	}
 }
 
+// Streaming logprobs arrive incrementally per chunk; the collected message must
+// carry the accumulated per-choice list, not just the final chunk's tokens.
+func TestChatStreamingLogprobsAccumulated(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-4o-mini\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hel\"},\"logprobs\":{\"content\":[{\"token\":\"Hel\",\"logprob\":-0.1,\"bytes\":[72],\"top_logprobs\":[]}]}}]}\n\n")
+		_, _ = io.WriteString(w, "data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-4o-mini\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"lo\"},\"logprobs\":{\"content\":[{\"token\":\"lo\",\"logprob\":-0.2,\"bytes\":[108],\"top_logprobs\":[]}]},\"finish_reason\":\"stop\"}]}\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	resp, err := newTestClient(server).RunText(t.Context(), "hi", agent.Stream(true)).Collect()
+	if err != nil {
+		t.Fatalf("error = %v", err)
+	}
+	props := lastMessageAdditionalProperties(t, resp)
+	lp, ok := props["Logprobs"].(openai.ChatCompletionChunkChoiceLogprobs)
+	if !ok {
+		t.Fatalf("Logprobs = %T, want ChatCompletionChunkChoiceLogprobs", props["Logprobs"])
+	}
+	if len(lp.Content) != 2 {
+		t.Errorf("accumulated logprob content = %d tokens, want 2 (one per chunk)", len(lp.Content))
+	}
+}
+
 // lastMessageAdditionalProperties returns the AdditionalProperties of the last
 // message carrying any, so metadata assertions do not depend on message count.
 func lastMessageAdditionalProperties(t *testing.T, resp *agent.Response) map[string]any {
