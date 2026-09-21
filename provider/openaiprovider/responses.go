@@ -1656,7 +1656,7 @@ func responsesProcessStreamingUpdate(update responses.ResponseStreamEventUnion, 
 				// The in-progress event already emitted the ImageGenerationToolCallContent
 				// for this item, so emit only the finished result here to avoid a
 				// duplicate tool call.
-				u.Contents = []message.Content{imageGenerationResult(item.ID, item.Result, "png", item)}
+				u.Contents = []message.Content{imageGenerationResult(item.ID, item.Result, cmp.Or(item.OutputFormat, "png"), item)}
 			}
 		case responses.ResponseReasoningItem:
 			// Carry the completed reasoning item's encrypted content so it can be
@@ -1820,7 +1820,7 @@ func mcpToolCallErrorMessage(err responses.McpToolCallErrorUnion) string {
 func imageGenerationContents(item responses.ResponseOutputItemImageGenerationCall) message.Contents {
 	return message.Contents{
 		&message.ImageGenerationToolCallContent{CallID: item.ID},
-		imageGenerationResult(item.ID, item.Result, "png", item),
+		imageGenerationResult(item.ID, item.Result, cmp.Or(item.OutputFormat, "png"), item),
 	}
 }
 

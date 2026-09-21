@@ -5119,6 +5119,38 @@ func TestResponsesUserMessageWithVariousContentTypes_ConvertsCorrectly(t *testin
 	}
 }
 
+// The generated image's media type must follow the call's output_format rather
+// than always being image/png, matching the Python client (and the streaming
+// partial path).
+func TestResponsesImageGenerationCall_UsesOutputFormat(t *testing.T) {
+	const imageBase64 = "iVBORw0KGgo="
+	const input = `{"model":"gpt-4o-mini","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"draw"}]}]}`
+	const output = `{
+		"id":"resp_fmt","object":"response","created_at":1741892091,"status":"completed","model":"gpt-4o-mini",
+		"output":[{"type":"image_generation_call","id":"ig_fmt","status":"completed","output_format":"webp","result":"` + imageBase64 + `"}]
+	}`
+
+	server := newTestResponsesServer(t, input, output)
+	defer server.Close()
+
+	resp, err := newTestResponsesClient(server, "gpt-4o-mini").RunText(t.Context(), "draw").Collect()
+	if err != nil {
+		t.Fatalf("error = %v", err)
+	}
+	var image *message.DataContent
+	for content := range resp.Contents() {
+		if r, ok := content.(*message.ImageGenerationToolResultContent); ok && len(r.Outputs) == 1 {
+			image, _ = r.Outputs[0].(*message.DataContent)
+		}
+	}
+	if image == nil {
+		t.Fatal("no image data content surfaced")
+	}
+	if image.MediaType != "image/webp" {
+		t.Errorf("MediaType = %q, want %q", image.MediaType, "image/webp")
+	}
+}
+
 func TestResponsesNonStreamingImageGenerationCall_MapsToToolContents(t *testing.T) {
 	const imageBase64 = "iVBORw0KGgo="
 	const input = `
