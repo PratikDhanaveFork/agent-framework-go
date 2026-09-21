@@ -224,11 +224,12 @@ func TestHandler_MCPToolCallAndResultEmitEvents(t *testing.T) {
 	h.ServeHTTP(rr, req)
 
 	content := rr.Body.String()
-	if !strings.Contains(content, "TOOL_CALL_START") || !strings.Contains(content, "mcp_tool") {
-		t.Fatalf("expected MCP tool-call start event, got %q", content)
-	}
-	if !strings.Contains(content, "TOOL_CALL_RESULT") {
-		t.Fatalf("expected MCP tool-call result event, got %q", content)
+	// Assert the full tool-call lifecycle and the serialized result, so a
+	// regression dropping any event or the payload is caught.
+	for _, want := range []string{"TOOL_CALL_START", "mcp_tool", "TOOL_CALL_ARGS", "TOOL_CALL_END", "TOOL_CALL_RESULT", "ok"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("expected MCP tool-call SSE stream to contain %q, got %q", want, content)
+		}
 	}
 }
 
