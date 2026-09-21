@@ -292,6 +292,16 @@ func (a *client) buildParams(messages []*message.Message, opts []agent.Option) (
 			funcDecls = append(funcDecls, decl)
 		}
 	}
+	// A server-side (native) tool is any tool entry that carries no function
+	// declarations (GoogleSearch, CodeExecution, FileSearch, or a caller-supplied
+	// native tool). Detect it before appending the function-declarations tool.
+	hasServerSideTool := false
+	for _, tl := range cfg.Tools {
+		if tl != nil && tl.FunctionDeclarations == nil {
+			hasServerSideTool = true
+			break
+		}
+	}
 	if len(funcDecls) > 0 {
 		cfg.Tools = append(cfg.Tools, &genai.Tool{
 			FunctionDeclarations: funcDecls,
@@ -335,6 +345,20 @@ func (a *client) buildParams(messages []*message.Message, opts []agent.Option) (
 			cfg.ToolConfig = &tc
 		}
 		cfg.ToolConfig.FunctionCallingConfig = fc
+	}
+
+	// On the Gemini Developer API, when function declarations are combined with a
+	// server-side (native) tool, ask the server to echo its tool invocations so
+	// the caller can observe them. The flag is Developer-API-only (Vertex rejects
+	// it), matching the Python client's `not self._vertexai` gate.
+	if len(funcDecls) > 0 && hasServerSideTool && a.client.ClientConfig().Backend != genai.BackendVertexAI {
+		if cfg.ToolConfig == nil {
+			cfg.ToolConfig = &genai.ToolConfig{}
+		} else {
+			tc := *cfg.ToolConfig
+			cfg.ToolConfig = &tc
+		}
+		cfg.ToolConfig.IncludeServerSideToolInvocations = genai.Ptr(true)
 	}
 
 	// Build a map of CallID → function name by scanning all messages first.
