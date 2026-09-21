@@ -506,6 +506,10 @@ func buildRequestParts(msg *message.Message, callIDToName map[string]string) ([]
 
 type responsePartState struct {
 	pendingCodeCallID string
+	// pendingToolCallID is the id of the most recent server-side tool call, so a
+	// following tool response that omits its own id can still correlate with the
+	// call it answers.
+	pendingToolCallID string
 }
 
 // buildResponsePart converts a genai Part from a response into framework message content.
@@ -594,6 +598,7 @@ func buildResponsePart(part *genai.Part, contents message.Contents, state *respo
 		if callID == "" {
 			callID = "tool-call-" + uuid.NewString()
 		}
+		state.pendingToolCallID = callID
 		name := string(part.ToolCall.ToolType)
 		if name == "" {
 			name = "tool_call"
@@ -613,6 +618,11 @@ func buildResponsePart(part *genai.Part, contents message.Contents, state *respo
 		// result so it travels with the conversation, mirroring the Python
 		// reference.
 		callID := part.ToolResponse.ID
+		if callID == "" {
+			// Fall back to the preceding tool call's id so the result stays
+			// correlated with its call, then to a synthesized id.
+			callID = state.pendingToolCallID
+		}
 		if callID == "" {
 			callID = "tool-call-" + uuid.NewString()
 		}
