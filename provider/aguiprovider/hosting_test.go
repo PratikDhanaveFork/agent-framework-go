@@ -174,6 +174,32 @@ func TestHandler_MixedToolInvocations_OnlyClientToolEmitted(t *testing.T) {
 	}
 }
 
+// A tool call's TOOL_CALL_START must carry parentMessageId so the client
+// associates it with the assistant message rather than creating a separate
+// message per tool call. Matches the Python host.
+func TestHandler_ToolCallCarriesParentMessageID(t *testing.T) {
+	a := newTestAgent(func(_ context.Context, _ []*message.Message, _ ...agent.Option) iter.Seq2[*agent.ResponseUpdate, error] {
+		return func(yield func(*agent.ResponseUpdate, error) bool) {
+			yield(&agent.ResponseUpdate{
+				MessageID: "msg-1",
+				Role:      message.RoleAssistant,
+				Contents:  message.Contents{&message.FunctionCallContent{CallID: "c1", Name: "tool", Arguments: `{}`}},
+			}, nil)
+		}
+	})
+	h := aguiprovider.NewJSONHTTPHandler(a, aguiprovider.HandlerConfig{})
+
+	body := `{"threadId":"thread-1","runId":"run-1","messages":[{"id":"u1","role":"user","content":"ping"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	content := rr.Body.String()
+	if !strings.Contains(content, "TOOL_CALL_START") || !strings.Contains(content, `"parentMessageId":"msg-1"`) {
+		t.Fatalf("expected TOOL_CALL_START with parentMessageId msg-1, got %q", content)
+	}
+}
+
 func TestHandler_StateSnapshotEmitsStateEvent(t *testing.T) {
 	a := newTestAgent(func(_ context.Context, _ []*message.Message, _ ...agent.Option) iter.Seq2[*agent.ResponseUpdate, error] {
 		return func(yield func(*agent.ResponseUpdate, error) bool) {
