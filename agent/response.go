@@ -319,7 +319,7 @@ type ResponseUpdate struct {
 	Contents message.Contents `json:",omitzero"`
 }
 
-// String returns the concatenated text contents of the response messages.
+// String returns the concatenated text contents of this update.
 func (r *ResponseUpdate) String() string {
 	if r == nil {
 		return ""
