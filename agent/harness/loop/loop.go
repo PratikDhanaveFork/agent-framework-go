@@ -42,8 +42,8 @@ type Config struct {
 	// asks to continue wins, and the loop stops only when all evaluators stop.
 	Evaluators []Evaluator
 
-	// MaxIterations is the absolute safety cap for a single run. When nil,
-	// DefaultMaxIterations is used.
+	// MaxIterations is the absolute safety cap for a single run. When nil, a
+	// default of 10 iterations is used.
 	MaxIterations *int
 
 	// OnBehalfOfAuthorName stamps loop-synthesized feedback messages. When empty,
