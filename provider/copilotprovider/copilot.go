@@ -672,8 +672,9 @@ func (p *provider) assistantMessageUpdate(event copilot.SessionEvent, data *copi
 			ContentHeader: message.ContentHeader{RawRepresentation: event},
 			Text:          data.Content,
 		}
-		// Surface native model citations (enabled via AgentConfig.EnableCitations)
-		// as CitationAnnotations, mirroring the OpenAI chat/Responses providers.
+		// Surface native model citations (enabled via
+		// AgentConfig.SessionConfig.EnableCitations) as CitationAnnotations,
+		// mirroring the OpenAI chat/Responses providers.
 		if data.Citations != nil {
 			for _, source := range data.Citations.Sources {
 				fileID := firstNonNilString(source.Path)
