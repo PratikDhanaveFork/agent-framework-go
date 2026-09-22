@@ -127,7 +127,7 @@ type autocall struct {
 	disableApprovalNotRequiredBypassing bool
 }
 
-// New creates a new function-invoking chat client that wraps the provided client.
+// New creates automatic tool-invocation middleware configured by cfg.
 func New(cfg Config) agent.Middleware {
 	if cfg.NewID == nil {
 		cfg.NewID = uuid.NewString
