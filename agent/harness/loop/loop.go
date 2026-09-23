@@ -79,6 +79,12 @@ type Context struct {
 	// Options are the options supplied to the agent run.
 	Options []agent.Option
 
+	// Session is the agent session used for the iteration that just completed,
+	// resolved from the run options. It is nil when the run supplied no session.
+	// Evaluators that resolve per-session provider state (for example todo or
+	// mode providers) read it here rather than digging through Options.
+	Session *agent.Session
+
 	// Iteration is the number of completed agent runs so far.
 	Iteration int
 
@@ -215,6 +221,9 @@ func run(cfg Config, next agent.RunFunc, ctx context.Context, messages []*messag
 			resp.Coalesce()
 			loopCtx.Iteration++
 			loopCtx.LastResponse = &resp
+			if session, ok := agent.GetOption(currentOpts, agent.WithSession); ok {
+				loopCtx.Session = session
+			}
 
 			if hasPendingApprovalRequests(&resp) || loopCtx.Iteration >= maxIterations {
 				if returnLastResponseOnly {

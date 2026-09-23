@@ -13,9 +13,158 @@ import (
 	"testing"
 
 	"github.com/microsoft/agent-framework-go/agent"
+	"github.com/microsoft/agent-framework-go/agent/harness/agentmode"
 	"github.com/microsoft/agent-framework-go/agent/harness/loop"
+	"github.com/microsoft/agent-framework-go/agent/harness/todo"
 	"github.com/microsoft/agent-framework-go/message"
 )
+
+// todoStateForTest mirrors the todo provider's internal session-state shape so
+// tests can seed remaining items. It is decoded by the provider through the
+// session's raw-JSON path after a round-trip (see seedTodoSession).
+type todoStateForTest struct {
+	NextID int         `json:"nextId"`
+	Items  []todo.Item `json:"items"`
+}
+
+// seedTodoSession returns a session pre-populated with the given todo items.
+// It serializes the state and round-trips the session so the todo provider
+// decodes it from raw JSON rather than a type-specific cached value.
+func seedTodoSession(t *testing.T, items ...todo.Item) *agent.Session {
+	t.Helper()
+	s := &agent.Session{}
+	s.Set("todoProviderState", todoStateForTest{NextID: len(items) + 1, Items: items})
+	data, err := json.Marshal(s)
+	if err != nil {
+		t.Fatalf("marshal session: %v", err)
+	}
+	var out agent.Session
+	if err := json.Unmarshal(data, &out); err != nil {
+		t.Fatalf("unmarshal session: %v", err)
+	}
+	return &out
+}
+
+func TestTodoCompletionEvaluator_NoRemainingStops(t *testing.T) {
+	ev := loop.NewTodoCompletionEvaluator(todo.New(nil), loop.TodoCompletionConfig{})
+	got, err := ev.Evaluate(context.Background(), &loop.Context{Session: seedTodoSession(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ShouldReinvoke {
+		t.Fatal("ShouldReinvoke = true, want false when no todos remain")
+	}
+}
+
+func TestTodoCompletionEvaluator_RemainingContinuesWithFormattedList(t *testing.T) {
+	session := seedTodoSession(t,
+		todo.Item{ID: 1, Title: "Write tests", Description: "cover the evaluator"},
+		todo.Item{ID: 2, Title: "Ship it", IsComplete: true},
+		todo.Item{ID: 3, Title: "Review"},
+	)
+	ev := loop.NewTodoCompletionEvaluator(todo.New(nil), loop.TodoCompletionConfig{})
+	got, err := ev.Evaluate(context.Background(), &loop.Context{Session: session})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.ShouldReinvoke {
+		t.Fatal("ShouldReinvoke = false, want true while todos remain")
+	}
+	if !strings.Contains(got.Feedback, "- 1: Write tests — cover the evaluator") {
+		t.Fatalf("feedback missing formatted item with description: %q", got.Feedback)
+	}
+	if !strings.Contains(got.Feedback, "- 3: Review") {
+		t.Fatalf("feedback missing incomplete item: %q", got.Feedback)
+	}
+	if strings.Contains(got.Feedback, "Ship it") {
+		t.Fatalf("feedback should exclude completed items: %q", got.Feedback)
+	}
+	if strings.Contains(got.Feedback, loop.RemainingTodosPlaceholder) {
+		t.Fatalf("placeholder not substituted: %q", got.Feedback)
+	}
+}
+
+func TestTodoCompletionEvaluator_CustomTemplateWithoutPlaceholderOmitsList(t *testing.T) {
+	tmpl := "Keep going."
+	ev := loop.NewTodoCompletionEvaluator(todo.New(nil), loop.TodoCompletionConfig{FeedbackMessageTemplate: &tmpl})
+	got, err := ev.Evaluate(context.Background(), &loop.Context{Session: seedTodoSession(t, todo.Item{ID: 1, Title: "x"})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.ShouldReinvoke || got.Feedback != "Keep going." {
+		t.Fatalf("got reinvoke=%v feedback=%q, want true/%q", got.ShouldReinvoke, got.Feedback, "Keep going.")
+	}
+}
+
+func TestTodoCompletionEvaluator_ModeGatedStopsInOtherMode(t *testing.T) {
+	mode := agentmode.New(agentmode.Config{})
+	session := seedTodoSession(t, todo.Item{ID: 1, Title: "x"})
+	if err := mode.SetModeForSession(session, "execute"); err != nil {
+		t.Fatal(err)
+	}
+	ev := loop.NewTodoCompletionEvaluator(todo.New(nil), loop.TodoCompletionConfig{
+		Modes:        []string{"plan"},
+		ModeProvider: mode,
+	})
+	got, err := ev.Evaluate(context.Background(), &loop.Context{Session: session})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ShouldReinvoke {
+		t.Fatal("ShouldReinvoke = true in a non-listed mode, want false")
+	}
+}
+
+func TestTodoCompletionEvaluator_ModeGatedContinuesInListedMode(t *testing.T) {
+	mode := agentmode.New(agentmode.Config{}) // default mode is "plan"
+	session := seedTodoSession(t, todo.Item{ID: 1, Title: "x"})
+	ev := loop.NewTodoCompletionEvaluator(todo.New(nil), loop.TodoCompletionConfig{
+		Modes:        []string{"plan"},
+		ModeProvider: mode,
+	})
+	got, err := ev.Evaluate(context.Background(), &loop.Context{Session: session})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.ShouldReinvoke {
+		t.Fatal("ShouldReinvoke = false in a listed mode with remaining todos, want true")
+	}
+}
+
+func TestTodoCompletionEvaluator_NilContextErrors(t *testing.T) {
+	ev := loop.NewTodoCompletionEvaluator(todo.New(nil), loop.TodoCompletionConfig{})
+	if _, err := ev.Evaluate(context.Background(), nil); err == nil {
+		t.Fatal("expected error for nil context")
+	}
+}
+
+func TestNewTodoCompletionEvaluator_Panics(t *testing.T) {
+	cases := []struct {
+		name string
+		fn   func()
+	}{
+		{"nil provider", func() { loop.NewTodoCompletionEvaluator(nil, loop.TodoCompletionConfig{}) }},
+		{"modes without provider", func() {
+			loop.NewTodoCompletionEvaluator(todo.New(nil), loop.TodoCompletionConfig{Modes: []string{"plan"}})
+		}},
+		{"blank mode name", func() {
+			loop.NewTodoCompletionEvaluator(todo.New(nil), loop.TodoCompletionConfig{
+				Modes:        []string{"  "},
+				ModeProvider: agentmode.New(agentmode.Config{}),
+			})
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("expected panic")
+				}
+			}()
+			tc.fn()
+		})
+	}
+}
 
 func TestLoop_StopsImmediately_InvokesOnce(t *testing.T) {
 	capture := newCaptureAgent(func(call int, _ []*message.Message) []*agent.ResponseUpdate {
