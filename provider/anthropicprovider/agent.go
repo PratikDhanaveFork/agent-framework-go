@@ -963,6 +963,15 @@ func buildMessageParam(msg *message.Message) (anthropic.MessageParam, error) {
 				content = append(content, anthropic.NewDocumentBlock(anthropic.Base64PDFSourceParam{
 					Data: c.Data,
 				}))
+			case c.TopLevelMediaType() == "text":
+				// Anthropic accepts textual documents as a plain-text document
+				// source. DataContent stores bytes base64-encoded, so decode
+				// them back to the raw text the source expects.
+				decoded, err := c.Bytes()
+				if err != nil {
+					return anthropic.MessageParam{}, fmt.Errorf("anthropicprovider: failed to decode text document content: %w", err)
+				}
+				content = append(content, anthropic.NewDocumentBlock(anthropic.PlainTextSourceParam{Data: string(decoded)}))
 			}
 		case *message.URIContent:
 			switch {
@@ -987,6 +996,8 @@ func buildMessageParam(msg *message.Message) (anthropic.MessageParam, error) {
 					content = append(content, anthropic.NewImageBlockBase64(mediaType, encoded))
 				case isPDFMediaType(mediaType):
 					content = append(content, anthropic.NewDocumentBlock(anthropic.Base64PDFSourceParam{Data: encoded}))
+				case strings.HasPrefix(strings.ToLower(mediaType), "text/"):
+					content = append(content, anthropic.NewDocumentBlock(anthropic.PlainTextSourceParam{Data: string(data)}))
 				}
 			case c.TopLevelMediaType() == "image":
 				content = append(content, anthropic.NewImageBlock(anthropic.URLImageSourceParam{URL: c.URI}))
