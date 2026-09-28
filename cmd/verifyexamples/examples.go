@@ -670,6 +670,15 @@ var agentsExamples = []ExampleDefinition{
 		},
 	},
 	{
+		Name:                         "02_agents_providers_anthropic_function_tools",
+		ProjectPath:                  "examples/02-agents/providers/anthrophic/function_tools",
+		RequiredEnvironmentVariables: []string{"ANTHROPIC_API_KEY"},
+		ExpectedOutputDescription: []string{
+			"The output should report the weather in Amsterdam (cloudy with a high of 15°C).",
+			"The output should not contain error messages or stack traces.",
+		},
+	},
+	{
 		Name:        "02_agents_a2a_as_function_tools",
 		ProjectPath: "examples/02-agents/a2a/as_function_tools",
 		SkipReason:  "Requires a running A2A example server.",
