@@ -43,6 +43,9 @@ func init() {
 		&MCPServerToolResultContent{},
 		&WebSearchToolCallContent{},
 		&WebSearchToolResultContent{},
+		&ShellToolCallContent{},
+		&ShellToolResultContent{},
+		&ShellCommandOutputContent{},
 	} {
 		supportedContents[c.kind()] = reflect.TypeOf(c).Elem()
 	}
@@ -1141,6 +1144,104 @@ func (t *WebSearchToolResultContent) MarshalJSON() ([]byte, error) {
 }
 
 func (t WebSearchToolResultContent) kind() contentKind { return "webSearchToolResult" }
+
+// ShellToolCallContent represents the model's request to run one or more shell
+// commands, correlated by CallID. It is request metadata, not command output;
+// the produced output is carried by [ShellToolResultContent].
+type ShellToolCallContent struct {
+	ContentHeader
+
+	CallID   string
+	Commands []string
+	// TimeoutMS is the timeout in milliseconds for the shell command execution.
+	TimeoutMS *int
+	// MaxOutputLength is the maximum output length in characters.
+	MaxOutputLength *int
+	// Status is the status of the shell call (e.g. "in_progress", "completed",
+	// "incomplete").
+	Status string
+}
+
+func (t *ShellToolCallContent) GetCallID() string {
+	if t == nil {
+		return ""
+	}
+	return t.CallID
+}
+
+func (t *ShellToolCallContent) MarshalJSON() ([]byte, error) {
+	type alias ShellToolCallContent
+	tmp := struct {
+		*alias
+		Type contentKind
+	}{
+		alias: (*alias)(t),
+		Type:  t.kind(),
+	}
+	return json.Marshal(tmp)
+}
+
+func (t ShellToolCallContent) kind() contentKind { return "shellToolCall" }
+
+// ShellToolResultContent represents the aggregate result for a shell tool call,
+// correlated by CallID. Each per-command output is carried as a
+// [ShellCommandOutputContent] in Outputs.
+type ShellToolResultContent struct {
+	ContentHeader
+
+	CallID  string
+	Outputs Contents
+	// MaxOutputLength is the maximum output length in characters.
+	MaxOutputLength *int
+}
+
+func (t *ShellToolResultContent) GetCallID() string {
+	if t == nil {
+		return ""
+	}
+	return t.CallID
+}
+
+func (t *ShellToolResultContent) MarshalJSON() ([]byte, error) {
+	type alias ShellToolResultContent
+	tmp := struct {
+		*alias
+		Type contentKind
+	}{
+		alias: (*alias)(t),
+		Type:  t.kind(),
+	}
+	return json.Marshal(tmp)
+}
+
+func (t ShellToolResultContent) kind() contentKind { return "shellToolResult" }
+
+// ShellCommandOutputContent represents the output of one command execution
+// within a [ShellToolResultContent].
+type ShellCommandOutputContent struct {
+	ContentHeader
+
+	Stdout string
+	Stderr string
+	// ExitCode is the exit code of the command, or nil if the command timed out.
+	ExitCode *int
+	// TimedOut reports whether the command execution timed out.
+	TimedOut bool
+}
+
+func (t *ShellCommandOutputContent) MarshalJSON() ([]byte, error) {
+	type alias ShellCommandOutputContent
+	tmp := struct {
+		*alias
+		Type contentKind
+	}{
+		alias: (*alias)(t),
+		Type:  t.kind(),
+	}
+	return json.Marshal(tmp)
+}
+
+func (t ShellCommandOutputContent) kind() contentKind { return "shellCommandOutput" }
 
 // Coalesce combines adjacent compatible content elements and returns the
 // resulting slice. It may reuse and modify the receiver's backing array.

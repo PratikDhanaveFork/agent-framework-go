@@ -20,12 +20,14 @@ var (
 	_ message.ToolCallContent = (*message.ImageGenerationToolCallContent)(nil)
 	_ message.ToolCallContent = (*message.CodeInterpreterToolCallContent)(nil)
 	_ message.ToolCallContent = (*message.WebSearchToolCallContent)(nil)
+	_ message.ToolCallContent = (*message.ShellToolCallContent)(nil)
 
 	_ message.ToolResultContent = (*message.FunctionResultContent)(nil)
 	_ message.ToolResultContent = (*message.MCPServerToolResultContent)(nil)
 	_ message.ToolResultContent = (*message.ImageGenerationToolResultContent)(nil)
 	_ message.ToolResultContent = (*message.CodeInterpreterToolResultContent)(nil)
 	_ message.ToolResultContent = (*message.WebSearchToolResultContent)(nil)
+	_ message.ToolResultContent = (*message.ShellToolResultContent)(nil)
 
 	_ message.InputRequestContent  = (*message.ToolApprovalRequestContent)(nil)
 	_ message.InputResponseContent = (*message.ToolApprovalResponseContent)(nil)
@@ -425,6 +427,72 @@ func TestCodeInterpreterContentEncoding_Roundtrip(t *testing.T) {
 			}
 			if !reflect.DeepEqual(tt.content, decoded[0]) {
 				t.Errorf("expected content %v, got %v", tt.content, decoded[0])
+			}
+		})
+	}
+}
+
+func TestShellContentEncoding_Roundtrip(t *testing.T) {
+	timeout := 5000
+	maxOut := 4096
+	exit := 0
+	tests := []struct {
+		name    string
+		content message.Content
+	}{
+		{
+			name: "toolCall",
+			content: &message.ShellToolCallContent{
+				CallID:          "shell-call-1",
+				Commands:        []string{"ls -la", "pwd"},
+				TimeoutMS:       &timeout,
+				MaxOutputLength: &maxOut,
+				Status:          "completed",
+			},
+		},
+		{
+			name: "toolResult",
+			content: &message.ShellToolResultContent{
+				CallID:          "shell-call-1",
+				MaxOutputLength: &maxOut,
+				Outputs: message.Contents{
+					&message.ShellCommandOutputContent{
+						Stdout:   "total 0\n",
+						Stderr:   "",
+						ExitCode: &exit,
+						TimedOut: false,
+					},
+				},
+			},
+		},
+		{
+			name: "commandOutput_timedOut",
+			content: &message.ShellCommandOutputContent{
+				Stdout:   "partial",
+				Stderr:   "",
+				ExitCode: nil,
+				TimedOut: true,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data, err := json.Marshal(message.Contents{tt.content})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var decoded message.Contents
+			if err = json.Unmarshal(data, &decoded); err != nil {
+				t.Fatal(err)
+			}
+			if len(decoded) != 1 {
+				t.Fatalf("expected 1 content, got %d", len(decoded))
+			}
+			if _, ok := decoded[0].(*message.RawContent); ok {
+				t.Fatalf("content decoded to *message.RawContent, want %T (discriminator not registered)", tt.content)
+			}
+			if !reflect.DeepEqual(tt.content, decoded[0]) {
+				t.Errorf("expected content %#v, got %#v", tt.content, decoded[0])
 			}
 		})
 	}
