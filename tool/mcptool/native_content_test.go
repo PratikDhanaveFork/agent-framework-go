@@ -8,9 +8,38 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/microsoft/agent-framework-go/message"
 	"github.com/microsoft/agent-framework-go/tool/mcptool"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+// A framework URIContent maps to an MCP ResourceLink, whose name is a required
+// field. Since URIContent has no name, it must default to the URI rather than
+// emitting an empty name.
+func TestAddToolURIContentResourceLinkHasName(t *testing.T) {
+	server := mcp.NewServer(&mcp.Implementation{Name: "test-server", Version: "1.0.0"}, nil)
+	mcptool.AddTool(server, stubFuncTool{
+		name: "uri_content", schema: map[string]any{"type": "object"},
+		call: func(context.Context, string) (any, error) {
+			return &message.URIContent{URI: "https://example.com/report.pdf", MediaType: "application/pdf"}, nil
+		},
+	})
+	session := connectInMemory(t, t.Context(), server)
+	result, err := session.CallTool(t.Context(), &mcp.CallToolParams{Name: "uri_content", Arguments: map[string]any{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Content) != 1 {
+		t.Fatalf("got %d content blocks, want 1", len(result.Content))
+	}
+	link, ok := result.Content[0].(*mcp.ResourceLink)
+	if !ok {
+		t.Fatalf("content = %T, want *mcp.ResourceLink", result.Content[0])
+	}
+	if link.Name != "https://example.com/report.pdf" {
+		t.Errorf("ResourceLink.Name = %q, want the URI", link.Name)
+	}
+}
 
 func TestAddToolPreservesNativeMCPContent(t *testing.T) {
 	text := &mcp.TextContent{Text: "Screenshot captured", Meta: mcp.Meta{"source": "browser"}}
