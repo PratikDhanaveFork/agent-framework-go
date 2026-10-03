@@ -124,7 +124,9 @@ func (resp *Response) Usage() message.UsageDetails {
 }
 
 // Coalesce merges compatible content items within each message (adjacent
-// text/reasoning/data runs, and call-ID-keyed results regardless of position).
+// text/reasoning/data runs, and call-ID-keyed image-generation results,
+// web-search calls, and code-interpreter calls and results regardless of
+// position).
 func (resp *Response) Coalesce() {
 	if resp == nil {
 		return
