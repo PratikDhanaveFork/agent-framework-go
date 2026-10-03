@@ -150,7 +150,7 @@ func (a *chatClient) run(ctx context.Context, messages []*message.Message, optio
 			if choice.Message.Refusal != "" {
 				contents = append(contents, &message.ErrorContent{Message: choice.Message.Refusal, ErrorCode: "Refusal"})
 			}
-			finishReason = choice.FinishReason
+			finishReason = normalizeChatFinishReason(choice.FinishReason)
 			if len(choice.Logprobs.Content) > 0 || len(choice.Logprobs.Refusal) > 0 {
 				additionalProperties = map[string]any{"Logprobs": choice.Logprobs}
 			}
@@ -225,7 +225,7 @@ func (a *chatClient) run(ctx context.Context, messages []*message.Message, optio
 			var finishReason string
 			var additionalProperties map[string]any
 			if len(chunk.Choices) > 0 {
-				finishReason = chunk.Choices[0].FinishReason
+				finishReason = normalizeChatFinishReason(chunk.Choices[0].FinishReason)
 				if logprobs := chunk.Choices[0].Logprobs; len(logprobs.Content) > 0 || len(logprobs.Refusal) > 0 {
 					accLogprobs.Content = append(accLogprobs.Content, logprobs.Content...)
 					accLogprobs.Refusal = append(accLogprobs.Refusal, logprobs.Refusal...)
@@ -258,6 +258,17 @@ func (a *chatClient) run(ctx context.Context, messages []*message.Message, optio
 			yield(nil, stream.Err())
 		}
 	}
+}
+
+// normalizeChatFinishReason maps the deprecated "function_call" finish reason,
+// still emitted by some OpenAI-compatible endpoints, onto the canonical
+// "tool_calls", matching the Python client. Other reasons pass through
+// unchanged.
+func normalizeChatFinishReason(reason string) string {
+	if reason == "function_call" {
+		return "tool_calls"
+	}
+	return reason
 }
 
 func mapRole(r string) message.Role {
