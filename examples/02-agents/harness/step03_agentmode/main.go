@@ -58,7 +58,7 @@ func main() {
 
 	// Switch the session to "execute" mode. The next run rebuilds the injected
 	// instructions from this mode, so the agent now carries out the plan.
-	if err := modeProvider.SetModeForSession(session, "execute"); err != nil {
+	if err := modeProvider.SetMode(session, "execute", false); err != nil {
 		demo.Panic(err)
 	}
 
