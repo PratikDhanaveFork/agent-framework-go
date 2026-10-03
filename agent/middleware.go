@@ -4,7 +4,9 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"iter"
+	"reflect"
 	"slices"
 
 	"github.com/microsoft/agent-framework-go/internal/toolmiddleware"
@@ -42,8 +44,14 @@ func (mf MiddlewareFunc) Run(next RunFunc, ctx context.Context, messages []*mess
 
 // FunctionInvocationContext describes a function invocation intercepted by middleware.
 type FunctionInvocationContext struct {
-	// Function is the underlying tool. Treat this field as read-only; changing it
-	// does not change the tool invoked by the continuation.
+	// Function is the tool selected for invocation.
+	//
+	// Middleware may replace it before calling next to redirect the invocation.
+	// The replacement is invoked directly, bypassing later middleware, and
+	// Function is restored to the value seen by the current middleware after it
+	// returns.
+	// Replacing it does not retroactively change tool metadata or approval
+	// handling that already happened before the invocation reached middleware.
 	Function tool.FuncTool
 
 	// CallID identifies the originating function call. Treat this field as read-only;
@@ -136,12 +144,51 @@ func (t *functionInvocationTool) Call(ctx context.Context, args string) (any, er
 		return t.FuncTool.Call(ctx, invocation.Arguments)
 	}
 	for _, middleware := range slices.Backward(t.middlewares) {
-		inner := next
+		inner := validateContinuation(next)
 		next = func(ctx context.Context, invocation *FunctionInvocationContext) (any, error) {
-			return middleware(inner, ctx, invocation)
+			functionBeforeMiddleware := invocation.Function
+			defer func() {
+				invocation.Function = functionBeforeMiddleware
+			}()
+			continuation := validateContinuation(func(ctx context.Context, invocation *FunctionInvocationContext) (any, error) {
+				if !sameFuncTool(invocation.Function, functionBeforeMiddleware) {
+					return invocation.Function.Call(ctx, invocation.Arguments)
+				}
+				return inner(ctx, invocation)
+			})
+			return middleware(continuation, ctx, invocation)
 		}
 	}
-	return next(ctx, invocation)
+	return validateContinuation(next)(ctx, invocation)
+}
+
+func sameFuncTool(a, b tool.FuncTool) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	t := reflect.TypeOf(a)
+	if t != reflect.TypeOf(b) {
+		return false
+	}
+	if t.Comparable() {
+		return a == b
+	}
+	return reflect.DeepEqual(a, b)
+}
+
+// validateContinuation wraps a function invocation continuation so every
+// middleware layer, not just the terminal call, rejects a nil invocation or a
+// nil replaced function before invoking the next continuation.
+func validateContinuation(next func(context.Context, *FunctionInvocationContext) (any, error)) func(context.Context, *FunctionInvocationContext) (any, error) {
+	return func(ctx context.Context, invocation *FunctionInvocationContext) (any, error) {
+		if invocation == nil {
+			return nil, errors.New("agent: function invocation middleware called next with nil invocation")
+		}
+		if invocation.Function == nil {
+			return nil, errors.New("agent: function invocation middleware called next with nil function")
+		}
+		return next(ctx, invocation)
+	}
 }
 
 // compileRunChain applies the given middlewares around fn.
