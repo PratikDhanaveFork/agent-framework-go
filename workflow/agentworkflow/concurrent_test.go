@@ -268,16 +268,15 @@ func TestConcurrentWorkflowBuilder_AgentsRunInParallel(t *testing.T) {
 	}
 }
 
-func TestConcurrentWorkflowBuilder_NoArgWithOutputFromFallsBackToDefault(t *testing.T) {
+func TestConcurrentWorkflowBuilder_NoArgWithOutputFromIsAnError(t *testing.T) {
 	a := newLabeledEchoAgent("a", "A", "from-a")
 	b := newLabeledEchoAgent("b", "B", "from-b")
-	// Spreading an empty slice (WithOutputFrom(empty...)) must not disable all
-	// output; it should fall back to the default terminal output.
-	wf, err := agentworkflow.NewConcurrentWorkflowBuilder(a, b).WithOutputFrom().Build()
-	if err != nil {
-		t.Fatalf("Build: %v", err)
-	}
-	if len(wf.OutputExecutorIDs()) == 0 {
-		t.Fatal("no-arg WithOutputFrom() disabled all workflow output")
+	// An explicit output designation with no agents (e.g. spreading an
+	// accidentally empty slice) is a caller error: Build must reject it rather
+	// than silently zeroing all output or guessing a default. Matches Python's
+	// hard error for an explicit-but-empty output designation.
+	_, err := agentworkflow.NewConcurrentWorkflowBuilder(a, b).WithOutputFrom().Build()
+	if err == nil {
+		t.Fatal("no-arg WithOutputFrom() should error, got nil")
 	}
 }

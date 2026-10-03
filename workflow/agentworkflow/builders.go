@@ -3,6 +3,7 @@
 package agentworkflow
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -36,13 +37,18 @@ func newAgentBindings(agents []*agent.Agent, cfg Config) ([]workflow.ExecutorBin
 type outputDesignations map[*agent.Agent]map[workflow.OutputTag]struct{}
 
 func (d outputDesignations) explicit() bool {
-	// An empty (but non-nil) map means WithOutputFrom/WithIntermediateOutputFrom
-	// was called with no agents, which is not an explicit designation: fall back
-	// to the default terminal output rather than disabling all output.
-	return len(d) != 0
+	return d != nil
 }
 
 func (d outputDesignations) withOutputFrom(agents ...*agent.Agent) (outputDesignations, error) {
+	// An explicit designation call with no agents is a caller error (e.g. an
+	// accidentally empty computed slice): it would otherwise silently zero all
+	// workflow output. Reject it rather than guessing, matching Python's
+	// _resolve_participant_output_config, which treats an explicit-but-empty
+	// output designation as a hard error.
+	if len(agents) == 0 {
+		return d, errors.New("agentworkflow: WithOutputFrom/WithIntermediateOutputFrom requires at least one agent")
+	}
 	if d == nil {
 		d = make(outputDesignations)
 	}
