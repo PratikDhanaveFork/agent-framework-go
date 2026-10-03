@@ -31,6 +31,75 @@ type testOutput struct {
 	Age  int    `json:"age"`
 }
 
+func TestToolCallsWithServiceIDDoNotClaimStoredHistory(t *testing.T) {
+	requests := make(chan []byte, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		requests <- body
+		w.Header().Set("Content-Type", "application/json")
+		if len(requests) == 1 {
+			_, _ = io.WriteString(w, `{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"id":"call_1","name":"lookup","args":{}}}]},"finishReason":"STOP"}]}`)
+		} else {
+			_, _ = io.WriteString(w, minimalTextResponse("done"))
+		}
+	}))
+	defer server.Close()
+	client, err := genai.NewClient(t.Context(), &genai.ClientConfig{
+		Backend:     genai.BackendGeminiAPI,
+		APIKey:      "test",
+		HTTPOptions: genai.HTTPOptions{BaseURL: server.URL},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := geminiprovider.NewAgent(client, geminiprovider.AgentConfig{Model: testModel})
+	session, err := a.CreateSession(t.Context(), agent.WithServiceID("thread-1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fn := functool.MustNew(functool.Config{Name: "lookup"}, func(context.Context, struct{}) (string, error) { return "found", nil })
+	_, err = a.RunText(t.Context(), "lookup order", agent.WithSession(session), agent.WithTool(fn)).Collect()
+	if err == nil || !strings.Contains(err.Error(), "did not return a valid conversation ID") {
+		t.Fatalf("error = %v, want missing conversation ID", err)
+	}
+	if len(requests) != 2 {
+		t.Fatalf("requests = %d, want 2", len(requests))
+	}
+	<-requests
+	var followup struct {
+		Contents []struct {
+			Role  string `json:"role"`
+			Parts []struct {
+				FunctionCall *struct {
+					ID string `json:"id"`
+				} `json:"functionCall"`
+				FunctionResponse *struct {
+					ID string `json:"id"`
+				} `json:"functionResponse"`
+			} `json:"parts"`
+		} `json:"contents"`
+	}
+	if err := json.Unmarshal(<-requests, &followup); err != nil {
+		t.Fatal(err)
+	}
+	roles := make([]string, len(followup.Contents))
+	for i, content := range followup.Contents {
+		roles[i] = content.Role
+	}
+	if !slices.Equal(roles, []string{"user", "model", "user"}) ||
+		len(followup.Contents[1].Parts) != 1 || followup.Contents[1].Parts[0].FunctionCall == nil || followup.Contents[1].Parts[0].FunctionCall.ID != "call_1" ||
+		len(followup.Contents[2].Parts) != 1 || followup.Contents[2].Parts[0].FunctionResponse == nil || followup.Contents[2].Parts[0].FunctionResponse.ID != "call_1" {
+		t.Fatalf("stateless follow-up omitted the user/call/result exchange: %+v", followup.Contents)
+	}
+	if session.ServiceID() != "thread-1" {
+		t.Errorf("failed run changed session ID to %q", session.ServiceID())
+	}
+}
+
 func TestNewAgent_PanicsWithNilClient(t *testing.T) {
 	defer func() {
 		if recover() == nil {
@@ -2565,6 +2634,48 @@ func TestFinishReason_Streaming(t *testing.T) {
 	}
 	if resp.FinishReason != "length" {
 		t.Errorf("aggregated Response.FinishReason = %q, want %q", resp.FinishReason, "length")
+	}
+}
+
+// On the Developer API, combining a function tool with a server-side (native)
+// tool must set toolConfig.includeServerSideToolInvocations so Gemini echoes its
+// server-side tool interactions. It must not be set when there are no function
+// declarations. Matches the Python client.
+func TestIncludeServerSideToolInvocations(t *testing.T) {
+	weatherTool := functool.MustNew(functool.Config{
+		Name:        "get_weather",
+		Description: "Get the weather for a city.",
+	}, func(_ context.Context, args struct{ City string }) (string, error) {
+		return "sunny", nil
+	})
+
+	requestFlag := func(t *testing.T, opts ...agent.Option) any {
+		t.Helper()
+		bodyCh := make(chan []byte, 1)
+		server := httptest.NewServer(captureAndRespond(t, bodyCh, "application/json", minimalTextResponse("ok")))
+		defer server.Close()
+		if _, err := newTestClient(t, server).RunText(t.Context(), "hi", opts...).Collect(); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		var req map[string]any
+		if err := json.Unmarshal(<-bodyCh, &req); err != nil {
+			t.Fatalf("unmarshal request body: %v", err)
+		}
+		flag, _ := nestedKey(req, "toolConfig", "includeServerSideToolInvocations")
+		return flag
+	}
+
+	// Function tool + native tool -> flag set.
+	if flag := requestFlag(t, agent.WithTool(weatherTool), agent.WithTool(&hostedtool.WebSearch{})); flag != true {
+		t.Errorf("includeServerSideToolInvocations = %v, want true", flag)
+	}
+	// Native tool only (no function declarations) -> flag absent.
+	if flag := requestFlag(t, agent.WithTool(&hostedtool.WebSearch{})); flag != nil {
+		t.Errorf("includeServerSideToolInvocations = %v, want absent for native-only", flag)
+	}
+	// Function tool only -> flag absent.
+	if flag := requestFlag(t, agent.WithTool(weatherTool)); flag != nil {
+		t.Errorf("includeServerSideToolInvocations = %v, want absent for function-only", flag)
 	}
 }
 
