@@ -569,17 +569,18 @@ func citationAnnotations(citations []anthropic.TextCitationUnion) []message.Anno
 			regions = message.AnnotatedRegions{
 				&message.TextSpanAnnotatedRegion{StartIndex: &startIndex, EndIndex: &endIndex},
 			}
-		case "content_block_location":
+		case "content_block_location", "search_result_location":
 			startIndex, endIndex := int(citation.StartBlockIndex), int(citation.EndBlockIndex)
 			regions = message.AnnotatedRegions{
 				&message.TextSpanAnnotatedRegion{StartIndex: &startIndex, EndIndex: &endIndex},
 			}
 		}
 		annotations = append(annotations, &message.CitationAnnotation{
-			FileID:            citation.FileID,
-			Snippet:           citation.CitedText,
-			Title:             cmp.Or(citation.DocumentTitle, citation.Title),
-			URL:               citation.URL,
+			FileID:  citation.FileID,
+			Snippet: citation.CitedText,
+			Title:   cmp.Or(citation.DocumentTitle, citation.Title),
+			// search_result_location carries its link in Source rather than URL.
+			URL:               cmp.Or(citation.URL, citation.Source),
 			AnnotatedRegions:  regions,
 			RawRepresentation: citation,
 		})
