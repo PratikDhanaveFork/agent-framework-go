@@ -1164,6 +1164,50 @@ func TestNewLocal_initializePersistent(t *testing.T) {
 	}
 }
 
+func TestRun_persistentCanceledBeforeCall(t *testing.T) {
+	skipIfNotPOSIX(t)
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name    string
+		timeout time.Duration
+		wantErr error
+	}{
+		{name: "canceled", timeout: time.Hour, wantErr: context.Canceled},
+		{name: "expired", timeout: -time.Second, wantErr: context.DeadlineExceeded},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ft := newLocal(t, shelltool.LocalConfig{
+				Shell:   "/bin/sh",
+				Timeout: new(5 * time.Second),
+			})
+			t.Cleanup(func() {
+				if err := ft.Close(); err != nil {
+					t.Errorf("close shell: %v", err)
+				}
+			})
+			result, err := ft.Run(t.Context(), "AF_CANCEL_CONTROL=preserved")
+			if err != nil || result.ExitCode != 0 {
+				t.Fatalf("setup: result=%+v, err=%v", result, err)
+			}
+
+			ctx, cancel := context.WithTimeout(t.Context(), tc.timeout)
+			cancel()
+			_, err = ft.Run(ctx, "AF_CANCEL_CONTROL=changed")
+			if !errors.Is(err, tc.wantErr) {
+				t.Errorf("Run error = %v, want %v", err, tc.wantErr)
+			}
+
+			// The canceled command must leave the shell usable and its state intact.
+			result, err = ft.Run(t.Context(), "printf '%s' \"$AF_CANCEL_CONTROL\"")
+			if err != nil || result.ExitCode != 0 || result.Stdout != "preserved" {
+				t.Errorf("follow-up: result=%+v, err=%v, want stdout %q", result, err, "preserved")
+			}
+		})
+	}
+}
+
 func TestCall_echo_defaultPersistent(t *testing.T) {
 	skipIfNotPOSIX(t)
 	t.Parallel()
