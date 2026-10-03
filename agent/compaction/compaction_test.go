@@ -147,6 +147,39 @@ func TestTruncationStrategy_ExcludesOldestGroups(t *testing.T) {
 	}
 }
 
+func TestTruncationStrategy_PreservesRawJSONBelowTokenLimit(t *testing.T) {
+	const payload = `{"order_id":"ORD-1042","status":"shipped"}`
+	for _, tt := range []struct {
+		name   string
+		result any
+	}{
+		{name: "raw JSON", result: json.RawMessage(payload)},
+		{name: "string", result: payload},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			messages := []*message.Message{
+				textMessage(message.RoleUser, "lookup"),
+				functionCallMessage("call-1", "lookup_order"),
+				functionResultMessage("call-1", tt.result),
+			}
+			index := compaction.CreateMessageIndex(messages, nil)
+			if got, want := index.TotalByteCount(), 72; got != want {
+				t.Errorf("TotalByteCount = %d, want %d", got, want)
+			}
+			strategy := &compaction.TruncationStrategy{
+				Trigger:                compaction.TokensExceed(25),
+				MinimumPreservedGroups: new(1),
+			}
+			if compacted, err := strategy.Compact(t.Context(), index); err != nil || compacted {
+				t.Fatalf("Compact = %t, %v; want no compaction below the token limit", compacted, err)
+			}
+			if got, want := len(index.IncludedMessages()), len(messages); got != want {
+				t.Errorf("retained %d messages, want %d", got, want)
+			}
+		})
+	}
+}
+
 func TestTruncationStrategy_SkipsPreExcludedAndSystemGroups(t *testing.T) {
 	index := compaction.CreateMessageIndex([]*message.Message{
 		textMessage(message.RoleSystem, "system"),
@@ -347,6 +380,44 @@ func TestToolResultStrategy_CollapsesOldToolGroups(t *testing.T) {
 	}
 	if !isSummaryMessage(index.IncludedMessages()[1]) {
 		t.Fatal("expected collapsed tool result to be marked as summary")
+	}
+}
+
+func TestDefaultToolCallFormatter_ResultTypes(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		result any
+		want   string
+	}{
+		{name: "raw JSON object", result: json.RawMessage(`{"status":"shipped"}`), want: "[Tool Calls]\nlookup:\n  - {\"status\":\"shipped\"}"},
+		{name: "raw JSON array", result: json.RawMessage(`["first","second"]`), want: "[Tool Calls]\nlookup:\n  - [\"first\",\"second\"]"},
+		{name: "raw JSON null", result: json.RawMessage(`null`), want: "[Tool Calls]\nlookup:\n  - null"},
+		{name: "empty raw JSON", result: json.RawMessage{}, want: "[Tool Calls]\nlookup:"},
+		{name: "nil raw JSON", result: json.RawMessage(nil), want: "[Tool Calls]\nlookup:"},
+		{name: "string", result: "shipped", want: "[Tool Calls]\nlookup:\n  - shipped"},
+		{name: "number", result: 42, want: "[Tool Calls]\nlookup:\n  - 42"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			group := &compaction.MessageGroup{
+				Messages: []*message.Message{
+					{
+						Role: message.RoleAssistant,
+						Contents: []message.Content{
+							&message.FunctionCallContent{CallID: "call-1", Name: "lookup"},
+						},
+					},
+					{
+						Role: message.RoleTool,
+						Contents: []message.Content{
+							&message.FunctionResultContent{CallID: "call-1", Result: tc.result},
+						},
+					},
+				},
+			}
+			if got := compaction.DefaultToolCallFormatter(group); got != tc.want {
+				t.Fatalf("formatter output = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -593,11 +664,53 @@ func TestNewProvider_SourceStampsGeneratedMessages(t *testing.T) {
 	if got, want := messageTexts(compactedMessages), []string{"[Summary]\nolder context", "u3", "a3"}; !slices.Equal(got, want) {
 		t.Fatalf("unexpected compacted messages: got %v want %v", got, want)
 	}
-	if got, want := compactedMessages[0].Source, (message.Source{Type: agent.SourceTypeContextProvider, ID: "compaction-test"}); got != want {
+	if got, want := compactedMessages[0].Source, (message.Source{Type: agent.SourceTypeHistoryProvider, ID: "compaction-test"}); got != want {
 		t.Fatalf("summary source = %#v, want %#v", got, want)
 	}
 	if compactedMessages[1].Source != (message.Source{}) || compactedMessages[2].Source != (message.Source{}) {
 		t.Fatalf("expected preserved messages to keep original sources, got %#v and %#v", compactedMessages[1].Source, compactedMessages[2].Source)
+	}
+}
+
+func TestNewProvider_DoesNotStoreGeneratedSummaryInHistory(t *testing.T) {
+	options := []agent.Option{agent.WithSession(agenttest.CreateSession())}
+	history := agent.NewInMemoryHistoryProvider(agent.InMemoryHistoryProviderConfig{
+		StateInitializer: func(*agent.Session) []*message.Message { return turnMessages(1) },
+	})
+	provider := compaction.NewContextProvider(compaction.ContextProviderConfig{
+		Strategy: &compaction.SummarizationStrategy{
+			Summarizer:             compaction.SummarizerFunc(func(context.Context, []*message.Message) (string, error) { return "older context", nil }),
+			MinimumPreservedGroups: new(1),
+		},
+	})
+
+	messages, err := history.Invoking(t.Context(), agent.InvokingContext{
+		Messages: []*message.Message{textMessage(message.RoleUser, "u2")},
+		Options:  options,
+	})
+	if err != nil {
+		t.Fatalf("load history: %v", err)
+	}
+	messages, _, err = invokeProvider(provider, t.Context(), messages, options...)
+	if err != nil {
+		t.Fatalf("compact history: %v", err)
+	}
+	if got, want := messageTexts(messages), []string{"[Summary]\nolder context", "u2"}; !slices.Equal(got, want) {
+		t.Fatalf("model request = %v, want %v", got, want)
+	}
+	if err := history.Invoked(t.Context(), agent.InvokedContext{
+		RequestMessages:  messages,
+		ResponseMessages: []*message.Message{textMessage(message.RoleAssistant, "a2")},
+		Options:          options,
+	}); err != nil {
+		t.Fatalf("store history: %v", err)
+	}
+	stored, err := history.Invoking(t.Context(), agent.InvokingContext{Options: options})
+	if err != nil {
+		t.Fatalf("reload history: %v", err)
+	}
+	if got, want := messageTexts(stored), []string{"u1", "a1", "u2", "a2"}; !slices.Equal(got, want) {
+		t.Errorf("stored history = %v, want %v", got, want)
 	}
 }
 

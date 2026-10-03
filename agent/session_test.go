@@ -68,7 +68,9 @@ func TestSessionState_Set_OverwritesExistingValue(t *testing.T) {
 func TestSessionState_Delete_ExistingKey(t *testing.T) {
 	session := agenttest.CreateSession()
 	session.Set("key1", "value1")
-	session.Delete("key1")
+	if !session.Delete("key1") {
+		t.Fatal("expected existing key to be removed")
+	}
 
 	var v string
 	ok, err := session.Get("key1", &v)
@@ -77,6 +79,20 @@ func TestSessionState_Delete_ExistingKey(t *testing.T) {
 	}
 	if ok {
 		t.Error("expected key to be removed")
+	}
+}
+
+func TestSessionState_Delete_NonexistentKey_ReturnsFalse(t *testing.T) {
+	session := agenttest.CreateSession()
+	if session.Delete("nonexistent") {
+		t.Fatal("expected nonexistent key to report not removed")
+	}
+}
+
+func TestSessionState_Delete_NilSession_ReturnsFalse(t *testing.T) {
+	var session *agent.Session
+	if session.Delete("key") {
+		t.Fatal("expected nil session to report not removed")
 	}
 }
 
@@ -281,5 +297,29 @@ func mustUnmarshalJSON(t *testing.T, data []byte, session *agent.Session) {
 	t.Helper()
 	if err := json.Unmarshal(data, session); err != nil {
 		t.Fatalf("unexpected unmarshal error: %v", err)
+	}
+}
+
+func TestSession_MarshalAfterGet_PreservesUnreadFields(t *testing.T) {
+	// A Session round-trips through encoding/json for persistence. Reading a key
+	// with a partial/narrower struct must not cause the unread fields to be
+	// dropped when the session is later re-serialized.
+	const original = `{"State":{"k":{"A":1,"B":2}},"ServiceID":""}`
+	var s agent.Session
+	if err := json.Unmarshal([]byte(original), &s); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	var partial struct {
+		A int
+	}
+	if ok, err := s.Get("k", &partial); err != nil || !ok {
+		t.Fatalf("Get: ok=%v err=%v", ok, err)
+	}
+	out, err := json.Marshal(&s)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if string(out) != original {
+		t.Errorf("round-trip corrupted after Get:\n got:  %s\n want: %s", out, original)
 	}
 }
