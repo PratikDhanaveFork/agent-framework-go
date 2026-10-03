@@ -820,7 +820,7 @@ func cloneMessages(messages []*message.Message) []*message.Message {
 	return out
 }
 
-func TestLoop_FreshContextPerIteration_ContinueWithMessagesKeepsInitial(t *testing.T) {
+func TestLoop_FreshContextPerIteration_ContinueWithMessagesOverridesVerbatim(t *testing.T) {
 	capture := newCaptureAgent(func(int, []*message.Message) []*agent.ResponseUpdate {
 		return textUpdates("ack")
 	})
@@ -840,11 +840,10 @@ func TestLoop_FreshContextPerIteration_ContinueWithMessagesKeepsInitial(t *testi
 		t.Fatal(err)
 	}
 	secondCall := messageTexts(capture.messagesPerCall[1])
-	// Fresh mode must re-seed the original input; explicit messages compose with it.
-	if len(secondCall) == 0 || secondCall[0] != "original" {
-		t.Fatalf("second call = %v, want the original input preserved in fresh mode", secondCall)
-	}
-	if !slices.Contains(secondCall, "explicit") {
-		t.Fatalf("second call = %v, want the explicit message included", secondCall)
+	// Explicit ContinueWithMessages is a verbatim override even in fresh mode:
+	// the original input must not be re-seeded onto the explicit messages. Fresh
+	// mode still resets the session and governs the default-feedback path only.
+	if !slices.Equal(secondCall, []string{"explicit"}) {
+		t.Fatalf("second call = %v, want exactly [explicit] (verbatim override, no original)", secondCall)
 	}
 }
