@@ -63,15 +63,21 @@ func (s *Session) Set(key string, value any) {
 	s.state[key] = wrapped
 }
 
-// Delete removes the value with the given key.
-func (s *Session) Delete(key string) {
+// Delete removes the value with the given key and reports whether it existed.
+func (s *Session) Delete(key string) bool {
 	if s == nil {
-		return
+		return false
 	}
-	delete(s.state, key)
+	_, ok := s.state[key]
+	if ok {
+		delete(s.state, key)
+	}
+	return ok
 }
 
 // ServiceID returns the provider-specific identifier associated with the session.
+// When [Config.RequirePerServiceCallHistoryPersistence] is enabled, it may instead
+// identify history managed locally by the agent.
 func (s *Session) ServiceID() string {
 	if s == nil {
 		return ""

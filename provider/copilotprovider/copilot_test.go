@@ -300,6 +300,9 @@ func TestRun_SurfacesLifecycleEventEmittedDuringSessionResume(t *testing.T) {
 	if !hasRawEventOfType(response, "session.start") {
 		t.Fatal("lifecycle event emitted before the session.resume response was dropped; OnEvent must be registered before the RPC")
 	}
+	if response.ConversationID == nil || *response.ConversationID != "existing-session" {
+		t.Errorf("conversation ID = %v, want existing-session", response.ConversationID)
+	}
 }
 
 func TestRun_PreservesUserSuppliedOnEventHandler(t *testing.T) {
@@ -504,6 +507,31 @@ func TestConvertToAgentResponseUpdate_UsageEvent_SurfacesModel(t *testing.T) {
 	}
 	if got, _ := response.AdditionalProperties["model"].(string); got != "gpt-5" {
 		t.Fatalf("AdditionalProperties[model] = %q, want gpt-5", got)
+	}
+}
+
+// A content-filter-triggered usage event must report the canonical
+// "content_filter" finish reason, taking precedence over the raw finishReason,
+// matching the Python client.
+func TestConvertToAgentResponseUpdate_UsageEvent_ContentFilterTriggeredMapsFinishReason(t *testing.T) {
+	runtime := newFakeRuntime(t,
+		sessionEvent("assistant.usage", map[string]any{
+			"model":                  "claude-sonnet-4",
+			"inputTokens":            10,
+			"outputTokens":           0,
+			"finishReason":           "stop",
+			"contentFilterTriggered": true,
+		}),
+		idleEvent(),
+	)
+	agent := copilotprovider.NewAgent(runtime.client(), copilotprovider.AgentConfig{})
+
+	response, err := runText(t, agent, "hello")
+	if err != nil {
+		t.Fatalf("RunText: %v", err)
+	}
+	if response.FinishReason != "content_filter" {
+		t.Fatalf("FinishReason = %q, want content_filter", response.FinishReason)
 	}
 }
 
