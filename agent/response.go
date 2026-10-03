@@ -49,6 +49,11 @@ type Response struct {
 	// the provider supplies it. It is empty otherwise.
 	ModelID string `json:",omitzero"`
 
+	// ConversationID identifies conversation history retained after this response
+	// by the service or per-service-call history persistence. When nil, the response
+	// does not claim that its messages can be recovered from a retained conversation.
+	ConversationID *string `json:",omitzero"`
+
 	// CreatedAt is the timestamp for the response. It is zero when the provider
 	// did not supply a creation time.
 	CreatedAt time.Time `json:",omitzero"`
@@ -137,7 +142,7 @@ func (resp *Response) Coalesce() {
 //
 // Each message in the response becomes a separate update. Response-level
 // additional properties and a non-empty continuation token are included as
-// an additional metadata-only update when present.
+// an additional metadata-only update without a message ID when present.
 func (resp *Response) ToUpdates() []*ResponseUpdate {
 	if resp == nil {
 		return nil
@@ -157,6 +162,7 @@ func (resp *Response) ToUpdates() []*ResponseUpdate {
 			MessageID:            msg.ID,
 			ResponseID:           resp.ID,
 			ModelID:              resp.ModelID,
+			ConversationID:       resp.ConversationID,
 			FinishReason:         resp.FinishReason,
 			AuthorName:           msg.AuthorName,
 			Role:                 msg.Role,
@@ -165,11 +171,13 @@ func (resp *Response) ToUpdates() []*ResponseUpdate {
 		})
 	}
 
-	if hasAdditionalProperties || resp.ContinuationToken != "" {
+	if hasAdditionalProperties || resp.ContinuationToken != "" || resp.ModelID != "" {
 		extra := &ResponseUpdate{
 			AdditionalProperties: resp.AdditionalProperties,
 			AgentID:              resp.AgentID,
 			ResponseID:           resp.ID,
+			ModelID:              resp.ModelID,
+			ConversationID:       resp.ConversationID,
 			ContinuationToken:    resp.ContinuationToken,
 			CreatedAt:            resp.CreatedAt,
 		}
@@ -180,6 +188,8 @@ func (resp *Response) ToUpdates() []*ResponseUpdate {
 }
 
 // Update folds a streaming [ResponseUpdate] into resp, appending its contents to the matching message and updating response-level fields from later updates.
+// Additional properties on an update with a non-empty MessageID apply to that
+// message; otherwise they apply only to the response.
 func (resp *Response) Update(update *ResponseUpdate) {
 	if update == nil {
 		return
@@ -196,7 +206,7 @@ func (resp *Response) Update(update *ResponseUpdate) {
 		msg.CreatedAt = update.CreatedAt
 	}
 	msg.Contents = append(msg.Contents, update.Contents...)
-	if update.AdditionalProperties != nil {
+	if update.MessageID != "" && update.AdditionalProperties != nil {
 		if msg.AdditionalProperties == nil {
 			msg.AdditionalProperties = make(map[string]any)
 		}
@@ -205,10 +215,14 @@ func (resp *Response) Update(update *ResponseUpdate) {
 	msg.RawRepresentation = appendRawRepresentation(msg.RawRepresentation, update.RawRepresentation)
 
 	// Other members on a ResponseUpdate map to members of the response.
-	// Update the response object with those, preferring the values from later updates.
+	// Prefer metadata supplied by later updates; omitted metadata does not
+	// clear values already received for the response.
 	resp.AgentID = cmp.Or(update.AgentID, resp.AgentID)
 	resp.ID = cmp.Or(update.ResponseID, resp.ID)
 	resp.ModelID = cmp.Or(update.ModelID, resp.ModelID)
+	if update.ConversationID != nil {
+		resp.ConversationID = update.ConversationID
+	}
 	resp.FinishReason = cmp.Or(update.FinishReason, resp.FinishReason)
 	resp.RawRepresentation = appendRawRepresentation(resp.RawRepresentation, update.RawRepresentation)
 	if update.ContinuationToken == "" {
@@ -219,7 +233,7 @@ func (resp *Response) Update(update *ResponseUpdate) {
 	if !isValidCreatedAt(resp.CreatedAt) && isValidCreatedAt(update.CreatedAt) {
 		resp.CreatedAt = update.CreatedAt
 	}
-	if update.AdditionalProperties != nil {
+	if update.MessageID == "" && update.AdditionalProperties != nil {
 		if resp.AdditionalProperties == nil {
 			resp.AdditionalProperties = make(map[string]any)
 		}
@@ -288,6 +302,8 @@ type ResponseUpdate struct {
 
 	// AdditionalProperties contains provider-specific metadata associated with
 	// the update that does not fit the standard response-update schema.
+	// A non-empty MessageID scopes these properties to that message. Otherwise,
+	// they are response-level properties.
 	AdditionalProperties map[string]any `json:",omitzero"`
 
 	// AgentID identifies the agent that produced this update.
@@ -305,6 +321,13 @@ type ResponseUpdate struct {
 	// provider supplies it. It is typically set on updates that carry provider
 	// response metadata.
 	ModelID string `json:",omitzero"`
+
+	// ConversationID identifies history retained by the service or per-service-call
+	// history persistence. Providers set it only when later requests can refer to that
+	// history instead of resending the messages. Nil means this update does not
+	// supply an ID; it does not clear an ID reported by another update in the
+	// same response. The ID may change on each provider call.
+	ConversationID *string `json:",omitzero"`
 
 	// FinishReason is the reason the generation ended. It is typically set only
 	// on the final update of a stream. Common values are "stop", "length", and
@@ -330,7 +353,7 @@ type ResponseUpdate struct {
 	Contents message.Contents `json:",omitzero"`
 }
 
-// String returns the concatenated text contents of the response messages.
+// String returns the concatenated text contents of this update.
 func (r *ResponseUpdate) String() string {
 	if r == nil {
 		return ""
