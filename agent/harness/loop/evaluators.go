@@ -218,8 +218,8 @@ type CompletionMarkerEvaluator struct {
 // NewCompletionMarkerEvaluator creates an evaluator that waits for the
 // configured marker in the latest response text.
 func NewCompletionMarkerEvaluator(config CompletionMarkerConfig) *CompletionMarkerEvaluator {
-	marker := strings.TrimSpace(config.Marker)
-	if marker == "" {
+	marker := config.Marker
+	if strings.TrimSpace(marker) == "" {
 		panic("loop: completion marker cannot be empty")
 	}
 	template := defaultCompletionMarkerFeedbackTemplate
