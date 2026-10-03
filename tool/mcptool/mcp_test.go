@@ -7,13 +7,16 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/microsoft/agent-framework-go/message"
 	"github.com/microsoft/agent-framework-go/tool"
+	"github.com/microsoft/agent-framework-go/tool/functool"
 	"github.com/microsoft/agent-framework-go/tool/mcptool"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -738,29 +741,252 @@ func TestAddToolReturnsErrorContentResults(t *testing.T) {
 	})
 }
 
-func TestAddToolOmitsNonObjectReturnSchema(t *testing.T) {
-	ctx := context.Background()
-	server := mcp.NewServer(&mcp.Implementation{Name: "test-server", Version: "1.0.0"}, nil)
-	mcptool.AddTool(server, stubFuncTool{
-		name:         "string-output",
-		description:  "returns a string",
-		schema:       map[string]any{"type": "object"},
-		returnSchema: map[string]any{"type": "string"},
-		call: func(context.Context, string) (any, error) {
-			return "ok", nil
-		},
-	})
+func TestAddToolOmitsUnsupportedReturnSchema(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		typ  any
+	}{
+		{"string", "string"},
+		{"array or string", []string{"array", "string"}},
+		{"array or object", []string{"array", "object"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			server := mcp.NewServer(&mcp.Implementation{Name: "test-server", Version: "1.0.0"}, nil)
+			mcptool.AddTool(server, stubFuncTool{
+				name:         "string-output",
+				description:  "returns a string",
+				schema:       map[string]any{"type": "object"},
+				returnSchema: map[string]any{"type": tc.typ},
+				call: func(context.Context, string) (any, error) {
+					return "ok", nil
+				},
+			})
 
-	session := connectInMemory(t, ctx, server)
-	toolsResult, err := session.ListTools(ctx, nil)
-	if err != nil {
-		t.Fatalf("ListTools() error = %v", err)
+			session := connectInMemory(t, ctx, server)
+			toolsResult, err := session.ListTools(ctx, nil)
+			if err != nil {
+				t.Fatalf("ListTools() error = %v", err)
+			}
+			if len(toolsResult.Tools) != 1 {
+				t.Fatalf("expected one tool, got %d", len(toolsResult.Tools))
+			}
+			if toolsResult.Tools[0].OutputSchema != nil {
+				t.Fatalf("OutputSchema = %#v, want nil for unsupported schema", toolsResult.Tools[0].OutputSchema)
+			}
+		})
 	}
-	if len(toolsResult.Tools) != 1 {
-		t.Fatalf("expected one tool, got %d", len(toolsResult.Tools))
+}
+
+func TestAddToolArrayOutput(t *testing.T) {
+	for _, version := range []string{"2025-06-18", "2025-11-25", "2026-07-28"} {
+		for _, tc := range []struct {
+			name string
+			out  []string
+		}{
+			{"orders", []string{"ORD-1042", "ORD-1043"}},
+			{"empty", []string{}},
+			{"nil", nil},
+		} {
+			t.Run(version+"/"+tc.name, func(t *testing.T) {
+				server := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "1"}, nil)
+				mcptool.AddTool(server, functool.MustNew(functool.Config{Name: "list_orders"},
+					func(context.Context, struct{}) ([]string, error) { return tc.out, nil }))
+				ct, st := mcp.NewInMemoryTransports()
+				ss, err := server.Connect(t.Context(), st, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = ss.Close() })
+				client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "1"}, nil)
+				cs, err := client.Connect(t.Context(), ct, &mcp.ClientSessionOptions{ProtocolVersion: version})
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = cs.Close() })
+				if got := cs.InitializeResult().ProtocolVersion; got != version {
+					t.Fatalf("negotiated protocol = %q, want %q", got, version)
+				}
+				listed, err := cs.ListTools(t.Context(), nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(listed.Tools) != 1 || listed.Tools[0].OutputSchema == nil {
+					t.Fatal("array output schema missing")
+				}
+				result, err := cs.CallTool(t.Context(), &mcp.CallToolParams{Name: "list_orders", Arguments: map[string]any{}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if result.IsError || result.StructuredContent == nil {
+					t.Fatalf("missing structured array output: %#v", result)
+				}
+				want, _ := json.Marshal(map[string]any{"result": tc.out})
+				got, err := json.Marshal(result.StructuredContent)
+				if err != nil || string(got) != string(want) {
+					t.Fatalf("structured output = %s, %v; want %s", got, err, want)
+				}
+				wantText, err := json.Marshal(tc.out)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(result.Content) != 1 {
+					t.Fatalf("expected one content item, got %d", len(result.Content))
+				}
+				if text, ok := result.Content[0].(*mcp.TextContent); !ok || text.Text != string(wantText) {
+					t.Fatalf("content = %#v, want original JSON text %s", result.Content[0], wantText)
+				}
+				data, err := json.Marshal(listed.Tools[0].OutputSchema)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var schema jsonschema.Schema
+				if err := json.Unmarshal(data, &schema); err != nil {
+					t.Fatal(err)
+				}
+				if schema.Type != "object" {
+					t.Fatalf("output schema type = %q, want legacy-compatible object", schema.Type)
+				}
+				resolved, err := schema.Resolve(nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := resolved.Validate(result.StructuredContent); err != nil {
+					t.Fatalf("result does not match advertised schema: %v", err)
+				}
+			})
+		}
 	}
-	if toolsResult.Tools[0].OutputSchema != nil {
-		t.Fatalf("OutputSchema = %#v, want nil for non-object schema", toolsResult.Tools[0].OutputSchema)
+}
+
+func TestAddToolArrayOutputSchemaReferences(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		schema string
+		result string
+	}{
+		{"definitions", `{"type":"array","items":{"$ref":"#/$defs/order"},"$defs":{"order":{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}}}`, `[{"id":"ORD-1042"}]`},
+		{"encoded reference", `{"type":"array","items":{"$ref":"#%2F$defs%2Forder"},"$defs":{"order":{"type":"string"}}}`, `["ORD-1042"]`},
+		{"content schema", `{"type":"array","items":{"type":"string","contentMediaType":"application/json","contentSchema":{"$ref":"#/$defs/order"}},"$defs":{"order":{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}}}`, `["{\"id\":\"ORD-1042\"}"]`},
+		{"recursive", `{"type":"array","items":{"anyOf":[{"type":"string"},{"$ref":"#"}]}}`, `["root",["child"]]`},
+		{"schema ID", `{"$id":"https://example.com/orders","type":"array","items":{"$ref":"#/$defs/id"},"$defs":{"id":{"type":"string"}}}`, `["ORD-1042"]`},
+		{"schema dialect", `{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"array","items":{"type":"string"}}`, `["ORD-1042"]`},
+		{"default data", `{"type":"array","items":{"type":"object"},"default":[{"$ref":"#/items"}]}`, `[{"$ref":"#/items"}]`},
+		{"formatted JSON", `{"type":"array","items":{"type":"string"}}`, `[ "ORD-1042" ]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var original map[string]any
+			if err := json.Unmarshal([]byte(tc.schema), &original); err != nil {
+				t.Fatal(err)
+			}
+			before, err := json.Marshal(original)
+			if err != nil {
+				t.Fatal(err)
+			}
+			server := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "1"}, nil)
+			mcptool.AddTool(server, stubFuncTool{
+				name: "list_orders", schema: map[string]any{"type": "object"}, returnSchema: original,
+				call: func(context.Context, string) (any, error) { return json.RawMessage(tc.result), nil },
+			})
+			session := connectInMemory(t, t.Context(), server)
+			listed, err := session.ListTools(t.Context(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, err := json.Marshal(listed.Tools[0].OutputSchema)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var schema jsonschema.Schema
+			if err := json.Unmarshal(data, &schema); err != nil {
+				t.Fatal(err)
+			}
+			if dialect, _ := original["$schema"].(string); schema.Schema != dialect {
+				t.Fatalf("schema dialect = %q, want %q", schema.Schema, dialect)
+			}
+			resolved, err := schema.Resolve(nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := session.CallTool(t.Context(), &mcp.CallToolParams{Name: "list_orders"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := resolved.Validate(result.StructuredContent); err != nil {
+				t.Fatalf("result does not match wrapped schema: %v", err)
+			}
+			if len(result.Content) != 1 {
+				t.Fatalf("expected one content item, got %d", len(result.Content))
+			}
+			if text, ok := result.Content[0].(*mcp.TextContent); !ok || text.Text != tc.result {
+				t.Fatalf("content = %#v, want original JSON text %q", result.Content[0], tc.result)
+			}
+			after, err := json.Marshal(original)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(after) != string(before) {
+				t.Fatal("original output schema was mutated")
+			}
+			if tc.name == "default data" && string(schema.Properties["result"].Default) != `[{"$ref":"#/items"}]` {
+				t.Fatalf("schema default was changed: %s", schema.Properties["result"].Default)
+			}
+		})
+	}
+}
+
+func TestAddToolArrayOutputPreservesContentResults(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		result  any
+		text    string
+		isError bool
+	}{
+		{"native result", &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "native"}}}, "native", false},
+		{"native content", &mcp.TextContent{Text: "native"}, "native", false},
+		{"framework content", &message.TextContent{Text: "framework"}, "framework", false},
+		{"error content", &message.ErrorContent{Message: "failed"}, "failed", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result := callAddedTool(t, stubFuncTool{
+				name: "list_orders", schema: map[string]any{"type": "object"},
+				returnSchema: map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				call:         func(context.Context, string) (any, error) { return tc.result, nil },
+			})
+			if result.IsError != tc.isError || result.StructuredContent != nil || len(result.Content) != 1 {
+				t.Fatalf("explicit content result was wrapped: %#v", result)
+			}
+			if text, ok := result.Content[0].(*mcp.TextContent); !ok || text.Text != tc.text {
+				t.Fatalf("content = %#v, want text %q", result.Content[0], tc.text)
+			}
+		})
+	}
+}
+
+func TestAddToolArrayOutputMarshalError(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		result any
+	}{
+		{"invalid JSON", json.RawMessage(`[`)},
+		{"non-finite number", []float64{math.Inf(1)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result := callAddedTool(t, stubFuncTool{
+				name: "array", schema: map[string]any{"type": "object"},
+				returnSchema: map[string]any{"type": "array"},
+				call:         func(context.Context, string) (any, error) { return tc.result, nil },
+			})
+			if !result.IsError || result.StructuredContent != nil {
+				t.Fatalf("marshal failure reported as success: %#v", result)
+			}
+			if len(result.Content) != 1 {
+				t.Fatalf("expected an error message, got %#v", result.Content)
+			}
+			if text, ok := result.Content[0].(*mcp.TextContent); !ok || !strings.Contains(text.Text, "marshaling array tool result") {
+				t.Fatalf("missing marshal error detail: %#v", result.Content[0])
+			}
+		})
 	}
 }
 
