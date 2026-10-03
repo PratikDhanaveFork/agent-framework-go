@@ -299,6 +299,52 @@ func TestMemoryProviderInvokingSearchesAndInjectsRetrievedMemories(t *testing.T)
 	}
 }
 
+// The search id returned on one turn must be sent as previous_search_id on the
+// next turn (over the same session) so searches are incremental, matching the
+// Python provider.
+func TestMemoryProviderThreadsPreviousSearchID(t *testing.T) {
+	transport := &recordingTransport{}
+	transport.handle = func(req *http.Request, _ string) (*http.Response, error) {
+		return jsonResponse(req, http.StatusOK, `{
+			"memories":[{"memory_item":{"content":"memory one","kind":"user_profile","memory_id":"mem_1","scope":"user-456","updated_at":1700000000}}],
+			"search_id":"search_1"
+		}`), nil
+	}
+	provider := foundryprovider.NewMemoryProvider(validEndpoint, validCredential, "memory", validScope, foundryprovider.MemoryProviderConfig{
+		ClientOptions: azcore.ClientOptions{Transport: transport},
+		ContextPrompt: new("Memories:"),
+	})
+
+	session := &agent.Session{}
+	for i := 0; i < 2; i++ {
+		if _, _, err := provider.Invoking(t.Context(), agent.InvokingContext{
+			Messages: []*message.Message{message.NewText("what do you remember?")},
+			Options:  []agent.Option{agent.WithSession(session)},
+		}); err != nil {
+			t.Fatalf("Invoking[%d] error = %v", i, err)
+		}
+	}
+
+	// Filter to the contextual (item-bearing) searches; the static
+	// (user-profile) search issued once per session is item-less and does not
+	// participate in incremental search-id threading.
+	var contextual []string
+	for _, r := range transport.Requests() {
+		if strings.Contains(r.Body, `"items":[{`) {
+			contextual = append(contextual, r.Body)
+		}
+	}
+	if len(contextual) != 2 {
+		t.Fatalf("contextual request count = %d, want 2", len(contextual))
+	}
+	if got := jsonMap(t, contextual[0])["previous_search_id"]; got != nil {
+		t.Fatalf("first contextual request previous_search_id = %#v, want absent", got)
+	}
+	if got := jsonMap(t, contextual[1])["previous_search_id"]; got != "search_1" {
+		t.Fatalf("second contextual request previous_search_id = %#v, want search_1", got)
+	}
+}
+
 func TestMemoryProviderInvokingSearchFailureLogsAndReturnsOriginalMessages(t *testing.T) {
 	transport := &recordingTransport{handle: func(req *http.Request, _ string) (*http.Response, error) {
 		return jsonResponse(req, http.StatusInternalServerError, `{"error":"boom"}`), nil

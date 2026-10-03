@@ -26,6 +26,10 @@ const (
 	// per session and reused on later turns.
 	memoryStaticInitStateKey     = "foundrymemory.staticInitialized"
 	memoryStaticMemoriesStateKey = "foundrymemory.staticMemories"
+
+	// memorySearchIDStateKey stores the last search id on the session so that
+	// successive turns issue incremental memory searches.
+	memorySearchIDStateKey = "foundrymemory.previousSearchID"
 )
 
 // MemoryProviderConfig configures a Foundry memory provider.
@@ -214,10 +218,19 @@ func (p *MemoryProvider) provide(ctx context.Context, invoking agent.InvokingCon
 			Items:   items,
 			Options: &azaiprojects.MemorySearchResultOptions{MaxMemories: p.config.MaxMemories},
 		}
+		// Thread the previous search id so successive turns perform incremental
+		// searches, matching the Python provider.
+		var previousSearchID string
+		if ok, _ := session.Get(memorySearchIDStateKey, &previousSearchID); ok && previousSearchID != "" {
+			searchOptions.PreviousSearchID = &previousSearchID
+		}
 		result, err := p.client.SearchMemories(ctx, p.memoryStoreName, scope, searchOptions)
 		if err != nil {
 			p.log(ctx, slog.LevelError, "foundrymemory: failed to search memories", "memory_store", p.memoryStoreName, "error", err)
 		} else {
+			if result.SearchID != nil && *result.SearchID != "" {
+				session.Set(memorySearchIDStateKey, *result.SearchID)
+			}
 			contextual = memoryContents(result.Memories)
 		}
 	}

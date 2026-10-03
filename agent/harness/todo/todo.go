@@ -56,15 +56,12 @@ type Item struct {
 	IsComplete  bool   `json:"isComplete"`
 }
 
-// ItemInput is the input structure for adding a todo item.
-type ItemInput struct {
+type itemInput struct {
 	Title       string `json:"title"`
 	Description string `json:"description,omitempty"`
 }
 
-// CompleteInput is the input structure for completing a single todo item.
-// It carries the item ID and a reason describing how or why the item was completed.
-type CompleteInput struct {
+type completeInput struct {
 	ID     int    `json:"id"`
 	Reason string `json:"reason"`
 }
@@ -148,14 +145,17 @@ func (p *Provider) RemainingTodos(session *agent.Session) []Item {
 }
 
 func (p *Provider) loadState(session *agent.Session) *state {
+	// A fresh session starts numbering todos at 1, matching the .NET and Python
+	// harnesses (both seed NextId to 1); the first todo added would otherwise get
+	// the model-facing id 0.
 	if session == nil {
-		return &state{}
+		return &state{NextID: 1}
 	}
 	var s state
 	if found, _ := session.Get(stateKey, &s); found {
 		return &s
 	}
-	return &state{}
+	return &state{NextID: 1}
 }
 
 func (p *Provider) saveState(session *agent.Session, s *state) {
@@ -241,7 +241,7 @@ func (p *Provider) createTools(session *agent.Session) []tool.FuncTool {
 			Name:        "todos_add",
 			Description: "Add one or more todo items. Each item has a title and an optional description. Returns the list of created todo items.",
 		},
-		func(ctx context.Context, input []ItemInput) ([]Item, error) {
+		func(ctx context.Context, input []itemInput) ([]Item, error) {
 			mu := p.getSessionLock(session)
 			mu.Lock()
 			defer mu.Unlock()
@@ -269,7 +269,7 @@ func (p *Provider) createTools(session *agent.Session) []tool.FuncTool {
 			Name:        "todos_complete",
 			Description: "Mark one or more todo items as complete. Each entry has an ID and a reason describing how/why the item was completed. Returns the number of items that were found and marked complete.",
 		},
-		func(ctx context.Context, items []CompleteInput) (int, error) {
+		func(ctx context.Context, items []completeInput) (int, error) {
 			mu := p.getSessionLock(session)
 			mu.Lock()
 			defer mu.Unlock()
@@ -368,7 +368,7 @@ func formatTodoListMessage(items []Item) string {
 			status = "done"
 		}
 		fmt.Fprintf(&sb, "- %d [%s] %s", item.ID, status, item.Title)
-		if item.Description != "" {
+		if strings.TrimSpace(item.Description) != "" {
 			fmt.Fprintf(&sb, ": %s", item.Description)
 		}
 		sb.WriteString("\n")
