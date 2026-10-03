@@ -86,8 +86,7 @@ type MCPServer struct {
 	Headers map[string]string
 	// ApprovalMode controls whether calls to this MCP server require approval.
 	// The zero value leaves the provider default (which, for the OpenAI Responses
-	// API, requires approval for every call). Mirrors the .NET
-	// HostedMcpServerTool.ApprovalMode.
+	// API, requires approval for every call).
 	ApprovalMode MCPApprovalMode
 }
 
