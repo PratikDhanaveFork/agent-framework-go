@@ -110,8 +110,8 @@ func TestNew_CustomArgNameAndDescription(t *testing.T) {
 
 func TestNew_PanicsWithNilAgent(t *testing.T) {
 	defer func() {
-		if recover() == nil {
-			t.Fatal("expected panic")
+		if got, want := recover(), "agenttool: agent is required"; got != want {
+			t.Fatalf("panic = %#v, want %q", got, want)
 		}
 	}()
 	agenttool.New(nil, agenttool.Config{})
@@ -150,17 +150,32 @@ func TestName_FallsBackToAgentID(t *testing.T) {
 		Run: func(context.Context, []*message.Message, ...agent.Option) iter.Seq2[*agent.ResponseUpdate, error] {
 			return func(func(*agent.ResponseUpdate, error) bool) {}
 		},
-	}, agent.Config{ID: "unnamed-agent"})
+	}, agent.Config{
+		ID:          "unnamed-agent",
+		Description: "Test description",
+	})
 	tl := agenttool.New(a, agenttool.Config{})
 
+	if tl == nil {
+		t.Fatal("New() returned nil tool")
+	}
 	if got, want := tl.Name(), "unnamed_agent"; got != want {
 		t.Fatalf("Name() = %q, want %q", got, want)
+	}
+	if got, want := tl.Description(), "Test description"; got != want {
+		t.Fatalf("Description() = %q, want %q", got, want)
 	}
 }
 
 func TestDescription_DefaultsWhenEmpty(t *testing.T) {
-	tl := agenttool.New(newNamedAgent("Agent", ""), agenttool.Config{})
+	tl := agenttool.New(newNamedAgent("TestAgent", ""), agenttool.Config{})
 
+	if tl == nil {
+		t.Fatal("New() returned nil tool")
+	}
+	if got, want := tl.Name(), "TestAgent"; got != want {
+		t.Fatalf("Name() = %q, want %q", got, want)
+	}
 	if got, want := tl.Description(), "Invoke an agent to retrieve some information."; got != want {
 		t.Fatalf("Description() = %q, want %q", got, want)
 	}
@@ -250,5 +265,8 @@ func TestCall_PropagatesAgentError(t *testing.T) {
 	_, err := tl.Call(t.Context(), `{"query":"hello"}`)
 	if !errors.Is(err, expectedErr) {
 		t.Fatalf("Call() error = %v, want %v", err, expectedErr)
+	}
+	if err != expectedErr {
+		t.Fatalf("Call() error = %v, want original error instance %v", err, expectedErr)
 	}
 }

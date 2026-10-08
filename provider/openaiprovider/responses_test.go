@@ -1036,6 +1036,72 @@ func TestResponsesAssistantReplayPreservesHostedToolItems(t *testing.T) {
 	}
 }
 
+// A replayed assistant turn from client-side history must carry back the
+// citations its text originally arrived with, so the Responses API sees the
+// same annotations on round-trip. This is the inverse of populateAnnotations.
+func TestResponsesAssistantReplayRoundTripsCitationAnnotations(t *testing.T) {
+	start, end := 0, 5
+	contents := message.Contents{
+		&message.TextContent{
+			Text: "hello world",
+			ContentHeader: message.ContentHeader{
+				Annotations: []message.Annotation{
+					&message.CitationAnnotation{
+						Title:            "Example",
+						URL:              "https://example.com",
+						AnnotatedRegions: message.AnnotatedRegions{&message.TextSpanAnnotatedRegion{StartIndex: &start, EndIndex: &end}},
+					},
+					&message.CitationAnnotation{
+						FileID: "file_123",
+						Title:  "doc.pdf",
+					},
+				},
+			},
+		},
+	}
+
+	var captured map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"resp","object":"response","created_at":1,"status":"completed","model":"gpt-4o-mini","output":[]}`)
+	}))
+	defer server.Close()
+
+	a := newTestResponsesClient(server, "gpt-4o-mini")
+	if _, err := a.Run(t.Context(), []*message.Message{{Role: message.RoleAssistant, Contents: contents}}).Collect(); err != nil {
+		t.Fatal(err)
+	}
+
+	input, ok := captured["input"].([]any)
+	if !ok || len(input) != 1 {
+		t.Fatalf("input = %#v", captured["input"])
+	}
+	item, _ := input[0].(map[string]any)
+	textContents, _ := item["content"].([]any)
+	if len(textContents) != 1 {
+		t.Fatalf("assistant content = %#v, want one output_text", item["content"])
+	}
+	outputText, _ := textContents[0].(map[string]any)
+	anns, _ := outputText["annotations"].([]any)
+	if len(anns) != 2 {
+		t.Fatalf("annotations = %#v, want url_citation and file_citation", outputText["annotations"])
+	}
+	url, _ := anns[0].(map[string]any)
+	if url["type"] != "url_citation" || url["url"] != "https://example.com" || url["title"] != "Example" {
+		t.Errorf("url citation = %#v", url)
+	}
+	if url["start_index"] != float64(0) || url["end_index"] != float64(5) {
+		t.Errorf("url citation span = [%v, %v), want [0, 5)", url["start_index"], url["end_index"])
+	}
+	file, _ := anns[1].(map[string]any)
+	if file["type"] != "file_citation" || file["file_id"] != "file_123" || file["filename"] != "doc.pdf" {
+		t.Errorf("file citation = %#v", file)
+	}
+}
+
 func TestResponsesAssistantReplayReconstructsPersistedMCPContents(t *testing.T) {
 	original := message.Contents{
 		&message.ToolApprovalRequestContent{
@@ -4132,7 +4198,7 @@ func TestResponsesResponseWithUsageDetails_ParsesTokenCounts(t *testing.T) {
                 "input_tokens":50,
                 "output_tokens":25,
                 "total_tokens":75,
-                "input_tokens_details":{"cached_tokens":10},
+                "input_tokens_details":{"cached_tokens":10,"cache_write_tokens":7},
                 "output_tokens_details":{"reasoning_tokens":5}
               }
             }
@@ -4150,6 +4216,9 @@ func TestResponsesResponseWithUsageDetails_ParsesTokenCounts(t *testing.T) {
 
 	// Find usage content
 	usage := resp.Usage()
+	if got := usage.AdditionalCounts["InputTokensDetails.CacheWriteTokens"]; got != 7 {
+		t.Errorf("expected cache_write_tokens 7, got %v", got)
+	}
 	if usage.InputTokenCount != 50 {
 		t.Errorf("expected input tokens 50, got %d", usage.InputTokenCount)
 	}
@@ -6733,12 +6802,21 @@ func TestDisableStoreOutputDoesNotUseOrUpdateResponseID(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = a.RunText(
+	result, err := a.RunText(
 		t.Context(), "hello",
 		agent.WithSession(session),
 	).Collect()
 	if err != nil {
 		t.Fatalf("error = %v", err)
+	}
+	if result == nil {
+		t.Fatal("response is nil")
+	}
+	if result.ID != "resp_67890" {
+		t.Errorf("response ID = %q, want resp_67890", result.ID)
+	}
+	if got := result.String(); got != "Hello!" {
+		t.Errorf("response text = %q, want Hello!", got)
 	}
 
 	if got := session.ServiceID(); got != "" {
@@ -6866,13 +6944,22 @@ func TestResponsesNewParamsStoreFalseDoesNotUpdateResponseID(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = a.RunText(
+	result, err := a.RunText(
 		t.Context(), "hello",
 		agent.WithSession(session),
 		openaiprovider.ResponsesNewParams(responses.ResponseNewParams{Store: openai.Bool(false)}),
 	).Collect()
 	if err != nil {
 		t.Fatalf("error = %v", err)
+	}
+	if result == nil {
+		t.Fatal("response is nil")
+	}
+	if result.ID != "resp_67890" {
+		t.Errorf("response ID = %q, want resp_67890", result.ID)
+	}
+	if got := result.String(); got != "Hello!" {
+		t.Errorf("response text = %q, want Hello!", got)
 	}
 
 	if got := session.ServiceID(); got != "" {
@@ -6921,7 +7008,7 @@ func TestResponsesNewParamsStoreFalseDoesNotDuplicateReasoningInclude(t *testing
 		},
 	)
 
-	_, err := a.RunText(
+	result, err := a.RunText(
 		t.Context(), "hello",
 		openaiprovider.ResponsesNewParams(responses.ResponseNewParams{
 			Store:   openai.Bool(false),
@@ -6930,6 +7017,15 @@ func TestResponsesNewParamsStoreFalseDoesNotDuplicateReasoningInclude(t *testing
 	).Collect()
 	if err != nil {
 		t.Fatalf("error = %v", err)
+	}
+	if result == nil {
+		t.Fatal("response is nil")
+	}
+	if result.ID != "resp_67890" {
+		t.Errorf("response ID = %q, want resp_67890", result.ID)
+	}
+	if got := result.String(); got != "Hello!" {
+		t.Errorf("response text = %q, want Hello!", got)
 	}
 }
 
@@ -6973,12 +7069,18 @@ func TestResponsesIncludeReasoningEncryptedContentFalseSkipsAutomaticInclude(t *
 		},
 	)
 
-	_, err := a.RunText(t.Context(), "hello",
+	result, err := a.RunText(t.Context(), "hello",
 		openaiprovider.ResponsesNewParams(responses.ResponseNewParams{Store: openai.Bool(false)}),
 		openaiprovider.ResponsesIncludeReasoningEncryptedContent(false),
 	).Collect()
 	if err != nil {
 		t.Fatalf("error = %v", err)
+	}
+	if result.ID != "resp_67890" || result.String() != "Hello!" || len(result.Messages) != 1 || result.Messages[0].Role != message.RoleAssistant {
+		t.Errorf("unexpected response: %+v", result)
+	}
+	if result.ConversationID != nil {
+		t.Errorf("conversation ID = %v, want nil with storage disabled", result.ConversationID)
 	}
 }
 

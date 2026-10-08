@@ -3,6 +3,7 @@
 package inproc_test
 
 import (
+	"errors"
 	"fmt"
 	"reflect"
 	"strconv"
@@ -58,6 +59,41 @@ func TestSubworkflowBinding_ForwardsOutputsAsParentOutputsAndMessages(t *testing
 	if !ok || string(got.Bytes) != "abc" {
 		t.Fatalf("OutputEvent.Output = %#v, want dataMessage abc", outputs[0].Output)
 	}
+}
+
+func TestSubworkflowBinding_ForwardsWorkflowWarningAsWorkflowWarning(t *testing.T) {
+	childStart := workflow.NewExecutor("child-start", func(ctx *workflow.Context, _ textMessage) error {
+		return ctx.AddEvent(workflow.WorkflowWarningEvent{Message: "child warning"})
+	}).Bind()
+	child, err := workflow.NewBuilder(childStart).Build()
+	if err != nil {
+		t.Fatalf("Build child: %v", err)
+	}
+
+	host := inproc.BindSubworkflowAsExecutor(child, "child")
+	parent, err := workflow.NewBuilder(host).Build()
+	if err != nil {
+		t.Fatalf("Build parent: %v", err)
+	}
+
+	run, err := inproc.Lockstep.Run(t.Context(), parent, textMessage{Text: "input"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	for _, event := range slicesCollect(run.OutgoingEvents()) {
+		switch warning := event.(type) {
+		case workflow.WorkflowWarningEvent:
+			if warning.Message != "child warning" {
+				t.Fatalf("warning message = %q, want child warning", warning.Message)
+			}
+			if warning.SubWorkflowID != "child" {
+				t.Fatalf("warning SubWorkflowID = %q, want child", warning.SubWorkflowID)
+			}
+			return
+		}
+	}
+	t.Fatal("no WorkflowWarningEvent received")
 }
 
 func TestSubworkflowBinding_UsesActiveRunnerInputTypes(t *testing.T) {
@@ -589,35 +625,64 @@ func TestSubworkflowBinding_NestedOrderProcessingSample(t *testing.T) {
 func TestSubworkflowBinding_SharedStateWorksWithinSubworkflow(t *testing.T) {
 	for _, env := range subworkflowStateEnvironments() {
 		t.Run(env.name, func(t *testing.T) {
-			text := "    Lorem ipsum dolor sit amet, consectetur adipiscing elit.  "
-			textRead := textReadBinding("text-read")
-			textTrim := textTrimBinding("text-trim")
-			charCount := charCountBinding("char-count")
-			sub, err := workflow.NewBuilder(textRead).
-				AddEdge(textRead, textTrim).
-				AddEdge(textTrim, charCount).
-				WithOutputFrom(charCount).
-				Build()
-			if err != nil {
-				t.Fatalf("Build subworkflow: %v", err)
-			}
+			for _, mode := range []struct {
+				name      string
+				streaming bool
+			}{
+				{name: "streaming", streaming: true},
+				{name: "nonstreaming"},
+			} {
+				t.Run(mode.name, func(t *testing.T) {
+					text := "    Lorem ipsum dolor sit amet, consectetur adipiscing elit.  "
+					textRead := textReadBinding("text-read")
+					textTrim := textTrimBinding("text-trim")
+					charCount := charCountBinding("char-count")
+					sub, err := workflow.NewBuilder(textRead).
+						AddEdge(textRead, textTrim).
+						AddEdge(textTrim, charCount).
+						WithOutputFrom(charCount).
+						Build()
+					if err != nil {
+						t.Fatalf("Build subworkflow: %v", err)
+					}
 
-			host := inproc.BindSubworkflowAsExecutor(sub, "internalStateSubworkflow")
-			parent, err := workflow.NewBuilder(host).
-				WithOutputFrom(host).
-				Build()
-			if err != nil {
-				t.Fatalf("Build parent: %v", err)
-			}
+					host := inproc.BindSubworkflowAsExecutor(sub, "internalStateSubworkflow")
+					parent, err := workflow.NewBuilder(host).
+						WithOutputFrom(host).
+						Build()
+					if err != nil {
+						t.Fatalf("Build parent: %v", err)
+					}
 
-			events := runWorkflowToHalt(t, env.env, parent, text)
-			outputs := outputEvents(events)
-			if len(outputs) != 1 {
-				t.Fatalf("output count = %d, want 1", len(outputs))
-			}
-			want := len(strings.TrimSpace(text))
-			if outputs[0].Output != want {
-				t.Fatalf("output = %#v, want %d", outputs[0].Output, want)
+					var events []workflow.Event
+					if mode.streaming {
+						events = runWorkflowToHalt(t, env.env, parent, text)
+					} else {
+						ctx := t.Context()
+						run, err := env.env.Run(ctx, parent, text)
+						if err != nil {
+							t.Fatalf("Run: %v", err)
+						}
+						events = slicesCollect(run.OutgoingEvents())
+						if err := run.Close(ctx); err != nil {
+							t.Fatalf("Close: %v", err)
+						}
+					}
+					if hasErrorEvents(events) {
+						t.Fatalf("unexpected error events: %#v", events)
+					}
+					outputs := outputEvents(events)
+					if len(outputs) != 1 {
+						t.Fatalf("output count = %d, want 1", len(outputs))
+					}
+					want := len(strings.TrimSpace(text))
+					if outputs[0].Output != want {
+						t.Fatalf("output = %#v, want %d", outputs[0].Output, want)
+					}
+					if outputs[0].ExecutorID != host.ID {
+						t.Fatalf("output executor = %q, want parent host %q", outputs[0].ExecutorID, host.ID)
+					}
+				})
 			}
 		})
 	}
@@ -646,13 +711,17 @@ func TestSubworkflowBinding_SharedStateIsIsolatedAcrossSubworkflowBoundary(t *te
 				t.Fatalf("Build parent: %v", err)
 			}
 
-			events := runWorkflowToHalt(t, env.env, parent, "    Lorem ipsum  ")
-			errors := errorEvents(events)
-			if len(errors) == 0 {
+			events := runWorkflowToHalt(t, env.env, parent, "    Lorem ipsum dolor sit amet, consectetur adipiscing elit.  ")
+			failures := errorEvents(events)
+			if len(failures) == 0 {
 				t.Fatal("expected workflow error from isolated subworkflow state, got none")
 			}
-			if errors[0].SubWorkflowID != "textTrimSubworkflow" {
-				t.Fatalf("SubWorkflowID = %q, want textTrimSubworkflow", errors[0].SubWorkflowID)
+			if failures[0].SubWorkflowID != "textTrimSubworkflow" {
+				t.Fatalf("SubWorkflowID = %q, want textTrimSubworkflow", failures[0].SubWorkflowID)
+			}
+			var missingState *stateNotFoundError
+			if !errors.As(failures[0].Error, &missingState) {
+				t.Fatalf("workflow error = %v (%T), want stateNotFoundError", failures[0].Error, failures[0].Error)
 			}
 		})
 	}
@@ -673,7 +742,11 @@ func runWorkflowToHalt(t *testing.T, env *inproc.ExecutionEnvironment, wf *workf
 	if err != nil {
 		t.Fatalf("RunStreaming: %v", err)
 	}
-	defer func() { _ = run.Close(ctx) }()
+	defer func() {
+		if err := run.Close(ctx); err != nil {
+			t.Errorf("Close run: %v", err)
+		}
+	}()
 	return readStreamToHalt(t, ctx, run)
 }
 
