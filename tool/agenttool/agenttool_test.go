@@ -257,6 +257,25 @@ func TestCall_InvalidJSONReturnsError(t *testing.T) {
 	}
 }
 
+// A non-string value for the configured argument must be rejected as a JSON
+// decoding error rather than silently invoking the agent with an empty query,
+// matching the schema's declared string type.
+func TestCall_WrongArgTypeReturnsError(t *testing.T) {
+	var invoked bool
+	a := agenttest.New(agenttest.NewResponseBuilder(
+		func(context.Context, []*message.Message, ...agent.Option) { invoked = true },
+	).AddText("unused").Build())
+	tl := agenttool.New(a, agenttool.Config{ArgName: "task"})
+
+	_, err := tl.Call(t.Context(), `{"task":123}`)
+	if err == nil {
+		t.Fatal("expected a JSON decoding error for a non-string argument")
+	}
+	if invoked {
+		t.Fatal("agent should not be invoked when the argument has the wrong type")
+	}
+}
+
 func TestCall_PropagatesAgentError(t *testing.T) {
 	expectedErr := errors.New("agent failed")
 	a := agenttest.New(agenttest.NewResponseBuilder().AddError(expectedErr).Build())

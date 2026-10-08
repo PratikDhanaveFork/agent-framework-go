@@ -113,13 +113,21 @@ func (t functool) Call(ctx context.Context, args string) (any, error) {
 	if args == "" {
 		args = "{}"
 	}
-	// The argument name is configurable, so decode into a map and read the
-	// configured key rather than a fixed struct field.
-	var in map[string]any
+	// The argument name is configurable, so decode into a map of raw messages
+	// and unmarshal the configured key into a string. Other entries stay as raw
+	// JSON so unrelated arguments are ignored, while a wrong type for the
+	// configured key surfaces a JSON decoding error rather than silently
+	// invoking the agent with an empty message.
+	var in map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(args), &in); err != nil {
 		return nil, err
 	}
-	query, _ := in[t.argName].(string)
+	var query string
+	if raw, ok := in[t.argName]; ok {
+		if err := json.Unmarshal(raw, &query); err != nil {
+			return nil, err
+		}
+	}
 	resp, err := t.agent.RunText(ctx, query, t.opts...).Collect()
 	if err != nil {
 		return "", err
