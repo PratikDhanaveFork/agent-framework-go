@@ -553,6 +553,12 @@ func TestLoop_FreshContextPerIteration_SessionCreatedCallback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if capture.callCount != 3 {
+		t.Fatalf("callCount = %d, want 3", capture.callCount)
+	}
+	if slices.Contains(createdSessions, initialSession) {
+		t.Fatal("session-created callback should not report the caller session")
+	}
 	if len(createdSessions) != 2 {
 		t.Fatalf("created sessions = %d, want 2", len(createdSessions))
 	}
@@ -709,6 +715,9 @@ func TestCompletionMarkerEvaluator_CustomTemplateSubstitutesLastResponse(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !evaluation.ShouldReinvoke {
+		t.Fatal("expected missing marker to continue")
+	}
 	want := "Previous: candidate name: NoteNest. Finish with FINISHED."
 	if evaluation.Feedback != want {
 		t.Fatalf("feedback = %q, want %q", evaluation.Feedback, want)
@@ -818,4 +827,32 @@ func cloneMessages(messages []*message.Message) []*message.Message {
 		out = append(out, msg.Clone())
 	}
 	return out
+}
+
+func TestLoop_FreshContextPerIteration_ContinueWithMessagesOverridesVerbatim(t *testing.T) {
+	capture := newCaptureAgent(func(int, []*message.Message) []*agent.ResponseUpdate {
+		return textUpdates("ack")
+	})
+	a := agent.New(capture.provider(), agent.Config{
+		Middlewares: []agent.Middleware{loop.New(loop.Config{
+			FreshContextPerIteration: true,
+			Evaluators: []loop.Evaluator{loop.EvaluatorFunc(func(_ context.Context, ctx *loop.Context) (loop.Evaluation, error) {
+				if ctx.Iteration == 1 {
+					return loop.ContinueWithMessages([]*message.Message{message.NewText("explicit")}), nil
+				}
+				return loop.Stop(), nil
+			})},
+		})},
+	})
+
+	if _, err := a.RunText(context.Background(), "original").Collect(); err != nil {
+		t.Fatal(err)
+	}
+	secondCall := messageTexts(capture.messagesPerCall[1])
+	// Explicit ContinueWithMessages is a verbatim override even in fresh mode:
+	// the original input must not be re-seeded onto the explicit messages. Fresh
+	// mode still resets the session and governs the default-feedback path only.
+	if !slices.Equal(secondCall, []string{"explicit"}) {
+		t.Fatalf("second call = %v, want exactly [explicit] (verbatim override, no original)", secondCall)
+	}
 }

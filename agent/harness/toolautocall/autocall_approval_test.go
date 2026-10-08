@@ -336,7 +336,7 @@ func TestFunctionInvoking_BindsProviderNativeApprovalRequest(t *testing.T) {
 	}
 }
 
-func TestFunctionInvoking_FirstApprovalRequestSnapshotWinsDuplicateID(t *testing.T) {
+func TestFunctionInvoking_DifferentCallsSurfacedUnderSameRequestIDAreNotBindable(t *testing.T) {
 	var originalCalls, substitutedCalls int
 	original := tool.ApprovalRequiredFunc(functool.MustNew(functool.Config{Name: "Original"}, func(context.Context, struct{}) (string, error) {
 		originalCalls++
@@ -378,6 +378,8 @@ func TestFunctionInvoking_FirstApprovalRequestSnapshotWinsDuplicateID(t *testing
 			}
 		}
 	}
+	// A provider that reuses a call id makes "Original" and "Substituted" collide on the same
+	// request id; it is impossible to tell which call the human answered, so neither is honored.
 	response := &message.ToolApprovalResponseContent{
 		RequestID: "duplicate-request",
 		Approved:  true,
@@ -388,8 +390,208 @@ func TestFunctionInvoking_FirstApprovalRequestSnapshotWinsDuplicateID(t *testing
 			t.Fatal(err)
 		}
 	}
-	if originalCalls != 1 || substitutedCalls != 0 {
-		t.Fatalf("tool calls = original:%d substituted:%d, want original:1 substituted:0", originalCalls, substitutedCalls)
+	if originalCalls != 0 || substitutedCalls != 0 {
+		t.Fatalf("tool calls = original:%d substituted:%d, want original:0 substituted:0", originalCalls, substitutedCalls)
+	}
+}
+
+// A provider that reuses one call ID for two different calls must not let a decision for one authorize the other.
+func TestFunctionInvoking_CollidingCallIDInSameTurnPoisonsBothApprovals(t *testing.T) {
+	var lookupCalls, removeCalls int
+	lookup := tool.ApprovalRequiredFunc(functool.MustNew(functool.Config{Name: "Lookup"}, func(context.Context, struct{}) (string, error) {
+		lookupCalls++
+		return "found", nil
+	}))
+	remove := tool.ApprovalRequiredFunc(functool.MustNew(functool.Config{Name: "Remove"}, func(context.Context, struct{}) (string, error) {
+		removeCalls++
+		return "removed", nil
+	}))
+
+	next := func(context.Context, []*message.Message, ...agent.Option) iter.Seq2[*agent.ResponseUpdate, error] {
+		return func(yield func(*agent.ResponseUpdate, error) bool) {
+			if !yield(&agent.ResponseUpdate{Role: message.RoleAssistant, Contents: message.Contents{
+				&message.FunctionCallContent{CallID: "shared-call", Name: "Remove", Arguments: `{}`},
+			}}, nil) {
+				return
+			}
+			yield(&agent.ResponseUpdate{Role: message.RoleAssistant, Contents: message.Contents{
+				&message.FunctionCallContent{CallID: "shared-call", Name: "Lookup", Arguments: `{}`},
+			}}, nil)
+		}
+	}
+
+	middleware := toolautocall.New(toolautocall.Config{})
+	session := &agent.Session{}
+	options := []agent.Option{agent.WithSession(session), agent.WithTool(remove), agent.WithTool(lookup)}
+
+	var requests []*message.ToolApprovalRequestContent
+	for update, err := range middleware.Run(next, t.Context(), []*message.Message{message.NewText("start")}, options...) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, c := range update.Contents {
+			if r, ok := c.(*message.ToolApprovalRequestContent); ok {
+				requests = append(requests, r)
+			}
+		}
+	}
+	if len(requests) != 2 || requests[0].RequestID != requests[1].RequestID {
+		t.Fatalf("got requests %#v, want two requests sharing one request id", requests)
+	}
+
+	// The caller approves Lookup and denies Remove.
+	var approveLookup, denyRemove *message.ToolApprovalResponseContent
+	for _, r := range requests {
+		if fcc, ok := r.ToolCall.(*message.FunctionCallContent); ok && fcc.Name == "Lookup" {
+			approveLookup = r.CreateResponse(true, "")
+		} else {
+			denyRemove = r.CreateResponse(false, "")
+		}
+	}
+	if approveLookup == nil || denyRemove == nil {
+		t.Fatal("expected one Lookup approval and one Remove denial")
+	}
+
+	for _, err := range middleware.Run(next, t.Context(), []*message.Message{message.New(approveLookup, denyRemove)}, options...) {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if lookupCalls != 0 || removeCalls != 0 {
+		t.Fatalf("tool calls = lookup:%d remove:%d, want lookup:0 remove:0 (ambiguous request id must not bind either call)", lookupCalls, removeCalls)
+	}
+}
+
+// Once a request id is ambiguous it must stay unbound for the rest of the run, however many more calls reuse it.
+func TestFunctionInvoking_AmbiguousRequestIDStaysUnbound(t *testing.T) {
+	// Each inner slice is one provider response whose items arrive as separate updates sharing one call ID.
+	// "hosted" is a hosted approval request that reuses the request ID derived from that call ID.
+	for _, tc := range []struct {
+		name string
+		runs [][]string
+	}{
+		{name: "three calls in one response", runs: [][]string{{"First", "Second", "Third"}}},
+		{name: "pending call then two colliding calls", runs: [][]string{{"First"}, {"Second", "Third"}}},
+		{name: "function call then hosted request", runs: [][]string{{"First", "hosted"}}},
+		{name: "hosted request then function call", runs: [][]string{{"hosted", "First"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			executed := map[string]int{}
+			options := []agent.Option{agent.WithSession(&agent.Session{})}
+			for _, name := range []string{"First", "Second", "Third"} {
+				options = append(options, agent.WithTool(tool.ApprovalRequiredFunc(functool.MustNew(functool.Config{Name: name}, func(context.Context, struct{}) (string, error) {
+					executed[name]++
+					return name, nil
+				}))))
+			}
+
+			providerCalls := 0
+			next := func(context.Context, []*message.Message, ...agent.Option) iter.Seq2[*agent.ResponseUpdate, error] {
+				index := providerCalls
+				providerCalls++
+				return func(yield func(*agent.ResponseUpdate, error) bool) {
+					if index >= len(tc.runs) {
+						yield(&agent.ResponseUpdate{Role: message.RoleAssistant, Contents: message.Contents{&message.TextContent{Text: "done"}}}, nil)
+						return
+					}
+					for _, name := range tc.runs[index] {
+						var content message.Content = &message.FunctionCallContent{CallID: "shared-call", Name: name, Arguments: `{}`}
+						if name == "hosted" {
+							content = &message.ToolApprovalRequestContent{
+								RequestID: "ficc_shared-call",
+								ToolCall:  &message.MCPServerToolCallContent{CallID: "shared-call", Name: name},
+							}
+						}
+						if !yield(&agent.ResponseUpdate{Role: message.RoleAssistant, Contents: message.Contents{content}}, nil) {
+							return
+						}
+					}
+				}
+			}
+
+			middleware := toolautocall.New(toolautocall.Config{})
+			var requests []*message.ToolApprovalRequestContent
+			for range tc.runs {
+				requests = nil
+				for update, err := range middleware.Run(next, t.Context(), []*message.Message{message.NewText("continue")}, options...) {
+					if err != nil {
+						t.Fatal(err)
+					}
+					for _, c := range update.Contents {
+						if r, ok := c.(*message.ToolApprovalRequestContent); ok {
+							requests = append(requests, r)
+						}
+					}
+				}
+			}
+			if len(requests) == 0 {
+				t.Fatal("no approval request was surfaced")
+			}
+
+			response := requests[len(requests)-1].CreateResponse(true, "")
+			for _, err := range middleware.Run(next, t.Context(), []*message.Message{message.New(response)}, options...) {
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if len(executed) != 0 {
+				t.Fatalf("executed tools = %v, want none", executed)
+			}
+		})
+	}
+}
+
+// Reporting the same hosted request more than once is not a collision and must not stop its approval from binding.
+func TestFunctionInvoking_ResurfacedHostedApprovalRequestStaysBindable(t *testing.T) {
+	newRequest := func() *message.ToolApprovalRequestContent {
+		return &message.ToolApprovalRequestContent{
+			RequestID: "mcpr_1",
+			ToolCall:  &message.MCPServerToolCallContent{CallID: "mcpr_1", Name: "search", ServerName: "docs", Arguments: `{"q":"x"}`},
+		}
+	}
+
+	var forwarded []*message.Message
+	providerCalls := 0
+	next := func(_ context.Context, messages []*message.Message, _ ...agent.Option) iter.Seq2[*agent.ResponseUpdate, error] {
+		providerCalls++
+		forwarded = messages
+		return func(yield func(*agent.ResponseUpdate, error) bool) {
+			if providerCalls == 1 {
+				for range 2 {
+					if !yield(&agent.ResponseUpdate{Role: message.RoleAssistant, Contents: message.Contents{newRequest()}}, nil) {
+						return
+					}
+				}
+				return
+			}
+			yield(&agent.ResponseUpdate{Role: message.RoleAssistant, Contents: message.Contents{&message.TextContent{Text: "done"}}}, nil)
+		}
+	}
+
+	middleware := toolautocall.New(toolautocall.Config{})
+	options := []agent.Option{agent.WithSession(&agent.Session{})}
+	for _, err := range middleware.Run(next, t.Context(), []*message.Message{message.NewText("start")}, options...) {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, err := range middleware.Run(next, t.Context(), []*message.Message{message.New(newRequest().CreateResponse(true, ""))}, options...) {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var responses int
+	for _, msg := range forwarded {
+		for _, c := range msg.Contents {
+			if r, ok := c.(*message.ToolApprovalResponseContent); ok && r.RequestID == "mcpr_1" {
+				responses++
+			}
+		}
+	}
+	if responses != 1 {
+		t.Fatalf("forwarded approval responses = %d, want 1", responses)
 	}
 }
 
