@@ -136,6 +136,7 @@ func (a *client) run(ctx context.Context, messages []*message.Message, options .
 		defer func() { _ = stream.Close() }()
 
 		var messageID string
+		var modelID string
 		var finishReason string
 		var usage message.UsageDetails
 		var accumulated anthropic.Message
@@ -151,6 +152,7 @@ func (a *client) run(ctx context.Context, messages []*message.Message, options .
 			switch event := event.AsAny().(type) {
 			case anthropic.MessageStartEvent:
 				messageID = cmp.Or(messageID, event.Message.ID)
+				modelID = cmp.Or(modelID, string(event.Message.Model))
 				usage.Add(toUsageDetails(event.Message.Usage))
 			case anthropic.MessageDeltaEvent:
 				// Anthropic reports the final cumulative output token count on
@@ -214,6 +216,7 @@ func (a *client) run(ctx context.Context, messages []*message.Message, options .
 				Role:              message.RoleAssistant,
 				ResponseID:        messageID,
 				MessageID:         messageID,
+				ModelID:           modelID,
 				CreatedAt:         time.Now(),
 				RawRepresentation: event,
 			}, nil) {
@@ -228,6 +231,7 @@ func (a *client) run(ctx context.Context, messages []*message.Message, options .
 			CreatedAt:    time.Now(),
 			Role:         message.RoleAssistant,
 			MessageID:    messageID,
+			ModelID:      modelID,
 			FinishReason: finishReason,
 			Contents: []message.Content{
 				&message.UsageContent{

@@ -188,6 +188,7 @@ func (a *client) run(ctx context.Context, messages []*message.Message, options .
 			if !yield(&agent.ResponseUpdate{
 				Contents:          streamContents,
 				Role:              message.RoleAssistant,
+				ModelID:           resp.ModelVersion,
 				FinishReason:      finishReason,
 				CreatedAt:         time.Now(),
 				RawRepresentation: resp,
@@ -203,6 +204,7 @@ func (a *client) run(ctx context.Context, messages []*message.Message, options .
 			yield(&agent.ResponseUpdate{
 				Contents:          finalContents,
 				Role:              message.RoleAssistant,
+				ModelID:           latestMetadataResp.ModelVersion,
 				CreatedAt:         time.Now(),
 				RawRepresentation: latestMetadataResp,
 			}, nil)
