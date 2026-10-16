@@ -651,6 +651,11 @@ var agentsExamples = []ExampleDefinition{
 		},
 	},
 	{
+		Name:        "02_agents_providers_ollama",
+		ProjectPath: "examples/02-agents/providers/ollama",
+		SkipReason:  "Requires a running local Ollama server with the model pulled.",
+	},
+	{
 		Name:                         "02_agents_providers_anthropic",
 		ProjectPath:                  "examples/02-agents/providers/anthrophic",
 		RequiredEnvironmentVariables: []string{"ANTHROPIC_API_KEY"},
