@@ -651,6 +651,16 @@ var agentsExamples = []ExampleDefinition{
 		},
 	},
 	{
+		Name:                         "02_agents_providers_gemini_function_tools",
+		ProjectPath:                  "examples/02-agents/providers/gemini/function_tools",
+		RequiredEnvironmentVariables: []string{"GEMINI_API_KEY"},
+		OptionalEnvironmentVariables: []string{"GEMINI_MODEL"},
+		ExpectedOutputDescription: []string{
+			"The output should report the weather in Amsterdam (cloudy with a high of 15°C).",
+			"The output should not contain error messages or stack traces.",
+		},
+	},
+	{
 		Name:                         "02_agents_providers_anthropic",
 		ProjectPath:                  "examples/02-agents/providers/anthrophic",
 		RequiredEnvironmentVariables: []string{"ANTHROPIC_API_KEY"},
