@@ -81,6 +81,17 @@ var getStartedExamples = []ExampleDefinition{
 
 var agentsExamples = []ExampleDefinition{
 	{
+		Name:            "02_agents_agents_multi_model_routing",
+		ProjectPath:     "examples/02-agents/agents/multi_model_routing",
+		IsDeterministic: true,
+		MustContain: []string{
+			"-> code-model",
+			"[code-model] here is a code review.",
+			"-> chat-model",
+			"[chat-model] happy to chat!",
+		},
+	},
+	{
 		Name:                         "02_agents_agents_step01_running",
 		ProjectPath:                  "examples/02-agents/agents/step01_running",
 		RequiredEnvironmentVariables: []string{"FOUNDRY_PROJECT_ENDPOINT"},
