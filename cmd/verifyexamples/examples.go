@@ -651,6 +651,15 @@ var agentsExamples = []ExampleDefinition{
 		},
 	},
 	{
+		Name:            "02_agents_providers_custom",
+		ProjectPath:     "examples/02-agents/providers/custom",
+		IsDeterministic: true,
+		MustContain: []string{
+			"HELLO FROM A CUSTOM PROVIDER",
+			"STREAMING WORKS TOO",
+		},
+	},
+	{
 		Name:                         "02_agents_providers_anthropic",
 		ProjectPath:                  "examples/02-agents/providers/anthrophic",
 		RequiredEnvironmentVariables: []string{"ANTHROPIC_API_KEY"},
