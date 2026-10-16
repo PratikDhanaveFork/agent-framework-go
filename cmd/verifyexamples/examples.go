@@ -81,6 +81,14 @@ var getStartedExamples = []ExampleDefinition{
 
 var agentsExamples = []ExampleDefinition{
 	{
+		Name:            "02_agents_agents_custom_middleware",
+		ProjectPath:     "examples/02-agents/agents/custom_middleware",
+		IsDeterministic: true,
+		MustContain: []string{
+			"received: My password is [REDACTED], please remember it.",
+		},
+	},
+	{
 		Name:                         "02_agents_agents_step01_running",
 		ProjectPath:                  "examples/02-agents/agents/step01_running",
 		RequiredEnvironmentVariables: []string{"FOUNDRY_PROJECT_ENDPOINT"},
