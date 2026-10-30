@@ -331,6 +331,16 @@ var agentsExamples = []ExampleDefinition{
 		},
 	},
 	{
+		Name:                         "02_agents_providers_azure_openai_chat_completion_api_key",
+		ProjectPath:                  "examples/02-agents/providers/azure/openai_chat_completion_api_key",
+		RequiredEnvironmentVariables: []string{"AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_API_KEY"},
+		OptionalEnvironmentVariables: []string{"AZURE_OPENAI_DEPLOYMENT_NAME"},
+		ExpectedOutputDescription: []string{
+			"The output should contain a joke about a pirate.",
+			"The output should not contain error messages or stack traces.",
+		},
+	},
+	{
 		Name:                         "02_agents_providers_azure_openai_responses",
 		ProjectPath:                  "examples/02-agents/providers/azure/openai_responses",
 		RequiredEnvironmentVariables: []string{"AZURE_OPENAI_ENDPOINT"},
