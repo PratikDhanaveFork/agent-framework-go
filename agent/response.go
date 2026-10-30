@@ -197,25 +197,31 @@ func (resp *Response) Update(update *ResponseUpdate) {
 	if update == nil {
 		return
 	}
-	msg := resp.targetMessage(update)
-	// Some members on ResponseUpdate map to members of Message.
-	// Incorporate those into the latest message; in cases where the message
-	// stores a single value, prefer the latest update's value over anything
-	// stored in the message.
-	msg.AuthorName = cmp.Or(update.AuthorName, msg.AuthorName)
-	msg.Role = cmp.Or(update.Role, msg.Role)
-	msg.ID = cmp.Or(update.MessageID, msg.ID)
-	if !isValidCreatedAt(msg.CreatedAt) && isValidCreatedAt(update.CreatedAt) {
-		msg.CreatedAt = update.CreatedAt
-	}
-	msg.Contents = append(msg.Contents, update.Contents...)
-	if update.MessageID != "" && update.AdditionalProperties != nil {
-		if msg.AdditionalProperties == nil {
-			msg.AdditionalProperties = make(map[string]any)
+	// Some members on ResponseUpdate map to members of Message. Only fold them
+	// into a message when the update actually carries message-level data. A
+	// metadata-only update (e.g. a response-level ModelID or continuation token
+	// with no contents/role/author/message ID, as emitted by ToUpdates) must not
+	// materialize an empty assistant message, so ToUpdates/Update round-trips.
+	if updateHasMessageData(update) {
+		msg := resp.targetMessage(update)
+		// Incorporate those into the latest message; in cases where the message
+		// stores a single value, prefer the latest update's value over anything
+		// stored in the message.
+		msg.AuthorName = cmp.Or(update.AuthorName, msg.AuthorName)
+		msg.Role = cmp.Or(update.Role, msg.Role)
+		msg.ID = cmp.Or(update.MessageID, msg.ID)
+		if !isValidCreatedAt(msg.CreatedAt) && isValidCreatedAt(update.CreatedAt) {
+			msg.CreatedAt = update.CreatedAt
 		}
-		maps.Copy(msg.AdditionalProperties, update.AdditionalProperties)
+		msg.Contents = append(msg.Contents, update.Contents...)
+		if update.MessageID != "" && update.AdditionalProperties != nil {
+			if msg.AdditionalProperties == nil {
+				msg.AdditionalProperties = make(map[string]any)
+			}
+			maps.Copy(msg.AdditionalProperties, update.AdditionalProperties)
+		}
+		msg.RawRepresentation = appendRawRepresentation(msg.RawRepresentation, update.RawRepresentation)
 	}
-	msg.RawRepresentation = appendRawRepresentation(msg.RawRepresentation, update.RawRepresentation)
 
 	// Other members on a ResponseUpdate map to members of the response.
 	// Prefer metadata supplied by later updates; omitted metadata does not
@@ -263,6 +269,19 @@ func appendRawRepresentation(current, incoming any) any {
 // default/uninitialized values.
 func isValidCreatedAt(t time.Time) bool {
 	return t.After(time.Unix(0, 0))
+}
+
+// updateHasMessageData reports whether update carries message-level content that
+// belongs in a [message.Message]. Metadata-only updates (response-level fields
+// such as ModelID, ResponseID, or a continuation token, with no
+// contents/role/author/message ID) return false so they do not create an empty
+// assistant message when folded via [Response.Update].
+func updateHasMessageData(update *ResponseUpdate) bool {
+	return len(update.Contents) > 0 ||
+		update.MessageID != "" ||
+		update.AuthorName != "" ||
+		update.Role != "" ||
+		update.RawRepresentation != nil
 }
 
 func (resp *Response) targetMessage(update *ResponseUpdate) *message.Message {
