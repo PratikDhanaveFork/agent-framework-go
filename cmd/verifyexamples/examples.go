@@ -651,6 +651,16 @@ var agentsExamples = []ExampleDefinition{
 		},
 	},
 	{
+		Name:                         "02_agents_providers_gemini_vertex",
+		ProjectPath:                  "examples/02-agents/providers/gemini/vertex",
+		RequiredEnvironmentVariables: []string{"GOOGLE_CLOUD_PROJECT"},
+		OptionalEnvironmentVariables: []string{"GOOGLE_CLOUD_LOCATION", "GEMINI_MODEL"},
+		ExpectedOutputDescription: []string{
+			"The output should contain a joke about a pirate.",
+			"The output should not contain error messages or stack traces.",
+		},
+	},
+	{
 		Name:                         "02_agents_providers_anthropic",
 		ProjectPath:                  "examples/02-agents/providers/anthrophic",
 		RequiredEnvironmentVariables: []string{"ANTHROPIC_API_KEY"},
