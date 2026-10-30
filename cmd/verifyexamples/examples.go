@@ -690,6 +690,11 @@ var agentsExamples = []ExampleDefinition{
 		SkipReason:  "Requires a running A2A example server.",
 	},
 	{
+		Name:        "02_agents_a2a_skills",
+		ProjectPath: "examples/02-agents/a2a/skills",
+		SkipReason:  "Requires a running A2A agent reachable at A2A_AGENT_URL.",
+	},
+	{
 		Name:        "02_agents_providers_a2a",
 		ProjectPath: "examples/02-agents/providers/a2a",
 		SkipReason:  "Requires a running A2A example server.",
