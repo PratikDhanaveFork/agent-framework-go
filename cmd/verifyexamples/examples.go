@@ -630,6 +630,16 @@ var agentsExamples = []ExampleDefinition{
 		},
 	},
 	{
+		Name:                         "02_agents_providers_openai_responses_stateless",
+		ProjectPath:                  "examples/02-agents/providers/openai/responses_stateless",
+		RequiredEnvironmentVariables: []string{"OPENAI_API_KEY"},
+		OptionalEnvironmentVariables: []string{"OPENAI_CHAT_MODEL_NAME"},
+		ExpectedOutputDescription: []string{
+			"The output should contain a pirate joke, then the same joke retold as a haiku, from a stateless OpenAI Responses agent.",
+			"The output should not contain error messages or stack traces.",
+		},
+	},
+	{
 		Name:                         "02_agents_providers_gemini",
 		ProjectPath:                  "examples/02-agents/providers/gemini",
 		RequiredEnvironmentVariables: []string{"GEMINI_API_KEY"},
