@@ -227,6 +227,36 @@ func TestCall_PassesQueryAndRunOptionsAndReturnsResponse(t *testing.T) {
 	}
 }
 
+// encoding/json matches object keys case-insensitively, so a tool call that
+// spells the configured argument with different casing (e.g. "Query") must still
+// reach the agent, preserving the behavior of the previous struct-tag decoding.
+func TestCall_CaseInsensitiveArgName(t *testing.T) {
+	var capturedMessages []*message.Message
+
+	a := agenttest.New(agenttest.NewResponseBuilder(
+		func(_ context.Context, messages []*message.Message, _ ...agent.Option) {
+			capturedMessages = messages
+		},
+	).AddText("agent response").Build())
+
+	tl := agenttool.New(a, agenttool.Config{})
+
+	if _, err := tl.Call(t.Context(), `{"Query":"hello"}`); err != nil {
+		t.Fatalf("Call() error = %v", err)
+	}
+
+	if len(capturedMessages) != 1 {
+		t.Fatalf("captured %d messages, want 1", len(capturedMessages))
+	}
+	text, ok := capturedMessages[0].Contents[0].(*message.TextContent)
+	if !ok {
+		t.Fatalf("message content type = %T, want *message.TextContent", capturedMessages[0].Contents[0])
+	}
+	if text.Text != "hello" {
+		t.Fatalf("message text = %q, want %q", text.Text, "hello")
+	}
+}
+
 func TestCall_EmptyArgsRejectsBlankQuery(t *testing.T) {
 	var capturedMessages []*message.Message
 

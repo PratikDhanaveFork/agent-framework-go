@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"regexp"
 	"slices"
+	"strings"
 
 	"github.com/microsoft/agent-framework-go/agent"
 	"github.com/microsoft/agent-framework-go/tool"
@@ -33,8 +34,7 @@ type Config struct {
 	RunOptions []agent.Option
 
 	// ArgName overrides the name of the single string argument the tool exposes
-	// to the model. Defaults to "query". Mirrors the .NET/Python as-tool
-	// argument-name option.
+	// to the model. Defaults to "query".
 	ArgName string
 
 	// ArgDescription overrides the description of that argument. Defaults to
@@ -123,7 +123,18 @@ func (t functool) Call(ctx context.Context, args string) (any, error) {
 		return nil, err
 	}
 	var query string
-	if raw, ok := in[t.argName]; ok {
+	raw, ok := in[t.argName]
+	if !ok {
+		// encoding/json matches object keys case-insensitively, so preserve that
+		// behavior for the configured argument name, preferring an exact match.
+		for k, v := range in {
+			if strings.EqualFold(k, t.argName) {
+				raw, ok = v, true
+				break
+			}
+		}
+	}
+	if ok {
 		if err := json.Unmarshal(raw, &query); err != nil {
 			return nil, err
 		}
