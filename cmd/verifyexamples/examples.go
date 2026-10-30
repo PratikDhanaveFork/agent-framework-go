@@ -769,6 +769,13 @@ var agentsExamples = []ExampleDefinition{
 		SkipReason:                   "Spawns a local stdio MCP server subprocess (go run) that requires live Foundry credentials.",
 	},
 	{
+		Name:                         "02_agents_mcp_streamable_http_mcp",
+		ProjectPath:                  "examples/02-agents/mcp/streamable_http_mcp",
+		RequiredEnvironmentVariables: []string{"FOUNDRY_PROJECT_ENDPOINT", "MCP_SERVER_URL"},
+		OptionalEnvironmentVariables: []string{"FOUNDRY_MODEL"},
+		SkipReason:                   "Requires a reachable remote MCP server (MCP_SERVER_URL) and live Foundry credentials.",
+	},
+	{
 		Name:            "02_agents_providers_github_copilot",
 		ProjectPath:     "examples/02-agents/providers/github-copilot",
 		IsDeterministic: true,
