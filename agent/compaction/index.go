@@ -79,7 +79,7 @@ func (index *MessageIndex) Update(messages []*message.Message) {
 		index.lastProcessedMessage = nil
 		return
 	}
-	processedMessageCount := index.includedRawMessageCount()
+	processedMessageCount := index.IncludedMessageCount()
 	// Locate where the already-processed prefix ends. lastProcessedMessage sits
 	// at index processedMessageCount-1 when nothing earlier was trimmed, so check
 	// that expected position first. Matching only the last occurrence of its

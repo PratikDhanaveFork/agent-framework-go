@@ -1084,3 +1084,28 @@ func TestMessageIndex_UpdateIncrementallyAppendsReasoningToolCallGroup(t *testin
 		t.Fatalf("appended tool MessageCount = %d, want 3", got)
 	}
 }
+
+// Regression: after a summary group is present, Update must keep the turns
+// appended since the last processed message. The caller re-passes the projected
+// list (summary + kept raw messages) plus the new turn; the already-processed
+// prefix length must count the included summary group, not only the raw
+// messages, or the boundary latches onto a repeated message (e.g. a re-sent
+// "continue") and silently drops the new turns.
+func TestMessageIndex_UpdateKeepsTurnsAfterSummary(t *testing.T) {
+	summary := textMessage(message.RoleAssistant, "[Summary] earlier context")
+	summary.AdditionalProperties = map[string]any{"_is_summary": true}
+	a2 := textMessage(message.RoleAssistant, "a2")
+	cont := textMessage(message.RoleUser, "continue")
+
+	index := compaction.CreateMessageIndex([]*message.Message{summary, a2, cont}, nil)
+
+	a3 := textMessage(message.RoleAssistant, "a3")
+	cont2 := textMessage(message.RoleUser, "continue")
+	index.Update([]*message.Message{summary, a2, cont, a3, cont2})
+
+	got := index.IncludedMessages()
+	want := []*message.Message{summary, a2, cont, a3, cont2}
+	if !slices.Equal(got, want) {
+		t.Fatalf("Update dropped turns after the summary: got %d included messages, want %d", len(got), len(want))
+	}
+}
