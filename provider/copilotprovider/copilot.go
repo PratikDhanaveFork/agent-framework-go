@@ -356,7 +356,42 @@ func copyResumeSessionConfig(source *copilot.SessionConfig) copilot.ResumeSessio
 		GitHubMCPToolConfig:                source.GitHubMCPToolConfig,
 		GitHubToken:                        source.GitHubToken,
 		ManagedSettings:                    source.ManagedSettings,
-		Streaming:                          copyBoolDefaultTrue(source.Streaming),
+		// Fields below also exist on SessionConfig and must carry over on resume
+		// so multi-turn options keep applying, matching the create path's full
+		// copy. Omitting them silently dropped caller configuration after the
+		// first turn.
+		AgentDirectories:              source.AgentDirectories,
+		AskUserVariant:                source.AskUserVariant,
+		AuthClientIDMetadataURL:       source.AuthClientIDMetadataURL,
+		Autopilot:                     source.Autopilot,
+		CanvasHandler:                 source.CanvasHandler,
+		CanvasProvider:                source.CanvasProvider,
+		Canvases:                      source.Canvases,
+		Commands:                      source.Commands,
+		CreateSessionFSProvider:       source.CreateSessionFSProvider,
+		Diagnostics:                   source.Diagnostics,
+		EnableMCPApps:                 source.EnableMCPApps,
+		EnableManagedSettings:         source.EnableManagedSettings,
+		EnforceManagedModelDefaults:   source.EnforceManagedModelDefaults,
+		ExcludedManagedSettings:       source.ExcludedManagedSettings,
+		ExpAssignments:                source.ExpAssignments,
+		ExtensionInfo:                 source.ExtensionInfo,
+		ExtensionSDKPath:              source.ExtensionSDKPath,
+		FeatureFlags:                  source.FeatureFlags,
+		GitHubTokenProvider:           source.GitHubTokenProvider,
+		HookDirectories:               source.HookDirectories,
+		ImageGeneration:               source.ImageGeneration,
+		IncludedBuiltinSkills:         source.IncludedBuiltinSkills,
+		InteractiveUser:               source.InteractiveUser,
+		OnAutoModeSwitchRequest:       source.OnAutoModeSwitchRequest,
+		OnElicitationRequest:          source.OnElicitationRequest,
+		OnExitPlanModeRequest:         source.OnExitPlanModeRequest,
+		OnPermissionRequestWithPrompt: source.OnPermissionRequestWithPrompt,
+		RequestCanvasRenderer:         source.RequestCanvasRenderer,
+		RequestExtensions:             source.RequestExtensions,
+		SandboxConfig:                 source.SandboxConfig,
+		SkillProvider:                 source.SkillProvider,
+		Streaming:                     copyBoolDefaultTrue(source.Streaming),
 	}
 }
 

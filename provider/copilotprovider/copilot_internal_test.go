@@ -447,3 +447,73 @@ func testFuncTool(t *testing.T, name string) tool.FuncTool {
 		func(context.Context, struct{}) (string, error) { return "ok", nil },
 	)
 }
+
+// TestCopyResumeSessionConfig_CarriesEveryCommonField guards against config
+// drift: any field present on both copilot.SessionConfig and
+// copilot.ResumeSessionConfig must be carried over by copyResumeSessionConfig,
+// so resumed sessions keep applying caller configuration. It sets a non-zero
+// sentinel on every common settable-kind field of a SessionConfig, copies it,
+// and asserts the corresponding ResumeSessionConfig field is non-zero.
+func TestCopyResumeSessionConfig_CarriesEveryCommonField(t *testing.T) {
+	src := &copilot.SessionConfig{}
+	sv := reflect.ValueOf(src).Elem()
+	st := sv.Type()
+	resumeType := reflect.TypeOf(copilot.ResumeSessionConfig{})
+
+	var checked []string
+	for i := 0; i < st.NumField(); i++ {
+		f := st.Field(i)
+		if !f.IsExported() {
+			continue
+		}
+		if _, ok := resumeType.FieldByName(f.Name); !ok {
+			continue // not a common field
+		}
+		if setSentinel(sv.Field(i)) {
+			checked = append(checked, f.Name)
+		}
+	}
+
+	got := reflect.ValueOf(copyResumeSessionConfig(src))
+	for _, name := range checked {
+		if got.FieldByName(name).IsZero() {
+			t.Errorf("copyResumeSessionConfig dropped field %q present on both SessionConfig and ResumeSessionConfig", name)
+		}
+	}
+}
+
+// setSentinel assigns a non-zero value to v for kinds we can construct
+// generically, returning false (so the caller skips it) for kinds we cannot set
+// without a concrete type (e.g. interfaces).
+func setSentinel(v reflect.Value) bool {
+	switch v.Kind() {
+	case reflect.Bool:
+		v.SetBool(true)
+	case reflect.String:
+		v.SetString("x")
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		v.SetInt(1)
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		v.SetUint(1)
+	case reflect.Float32, reflect.Float64:
+		v.SetFloat(1)
+	case reflect.Pointer:
+		v.Set(reflect.New(v.Type().Elem()))
+	case reflect.Slice:
+		v.Set(reflect.MakeSlice(v.Type(), 1, 1))
+	case reflect.Map:
+		v.Set(reflect.MakeMapWithSize(v.Type(), 1))
+	case reflect.Func:
+		t := v.Type()
+		v.Set(reflect.MakeFunc(t, func([]reflect.Value) []reflect.Value {
+			out := make([]reflect.Value, t.NumOut())
+			for i := range out {
+				out[i] = reflect.Zero(t.Out(i))
+			}
+			return out
+		}))
+	default:
+		return false // interfaces, channels, etc. — cannot set generically
+	}
+	return true
+}
