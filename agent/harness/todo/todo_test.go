@@ -1020,3 +1020,36 @@ func TestTodo_ConcurrentSessionAccess_NoDataRace(t *testing.T) {
 		}
 	}
 }
+
+// A whitespace-only title must be rejected rather than creating a titleless
+// todo, and the rejected add must not persist any state.
+func TestAddTodos_RejectsEmptyTitle(t *testing.T) {
+	p := todo.New(nil)
+	opts := sessionOpts()
+
+	_, outOpts, err := invokeProvider(p, context.Background(), newMessages("hi"), opts...)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var addTool tool.FuncTool
+	for _, tt := range collectTools(outOpts) {
+		if tt.Name() == "todos_add" {
+			ft, ok := tt.(tool.FuncTool)
+			if !ok {
+				t.Fatal("todos_add is not a FuncTool")
+			}
+			addTool = ft
+		}
+	}
+	if addTool == nil {
+		t.Fatal("todos_add tool not found")
+	}
+
+	if _, err := addTool.Call(context.Background(), `{"Arg0":[{"title":"   "}]}`); err == nil {
+		t.Fatal("expected an error for a whitespace-only title")
+	}
+	if items := p.AllTodos(mustSession(t, opts)); len(items) != 0 {
+		t.Fatalf("expected no items persisted on a rejected add, got %d", len(items))
+	}
+}

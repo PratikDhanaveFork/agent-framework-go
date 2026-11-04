@@ -250,9 +250,16 @@ func (p *Provider) createTools(session *agent.Session) []tool.FuncTool {
 			st := p.loadState(session)
 			var created []Item
 			for _, in := range input {
+				title := strings.TrimSpace(in.Title)
+				if title == "" {
+					// Reject empty titles rather than creating a useless
+					// titleless todo; nothing is persisted (saveState runs only
+					// after the loop), so the add is atomic.
+					return nil, fmt.Errorf("todo: item title cannot be empty")
+				}
 				item := Item{
 					ID:    st.NextID,
-					Title: strings.TrimSpace(in.Title),
+					Title: title,
 				}
 				if in.Description != "" {
 					item.Description = strings.TrimSpace(in.Description)
