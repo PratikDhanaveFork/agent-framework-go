@@ -308,6 +308,9 @@ func run(cfg Config, next agent.RunFunc, ctx context.Context, messages []*messag
 // and any "always approve" flags into standing rules.
 func prepareInbound(messages []*message.Message, st state) ([]*message.Message, state, error) {
 	for _, msg := range messages {
+		if msg == nil {
+			continue
+		}
 		for _, content := range msg.Contents {
 			if resp, ok := content.(*message.AlwaysApproveToolApprovalResponseContent); ok &&
 				(resp == nil || resp.InnerResponse == nil) {
@@ -320,6 +323,12 @@ func prepareInbound(messages []*message.Message, st state) ([]*message.Message, 
 	collectResponses := len(st.QueuedApprovalRequests) > 0 || len(st.CollectedApprovalResponses) > 0
 	var cleaned []*message.Message
 	for i, msg := range messages {
+		if msg == nil {
+			if cleaned != nil {
+				cleaned = append(cleaned, msg)
+			}
+			continue
+		}
 		var hasApproval bool
 		var remaining []message.Content
 		for _, c := range msg.Contents {
@@ -372,6 +381,12 @@ func prepareInbound(messages []*message.Message, st state) ([]*message.Message, 
 func removeConsumedApprovalResponses(messages []*message.Message) []*message.Message {
 	var out []*message.Message
 	for i, msg := range messages {
+		if msg == nil {
+			if out != nil {
+				out = append(out, nil)
+			}
+			continue
+		}
 		if !slices.ContainsFunc(msg.Contents, func(content message.Content) bool {
 			_, ok := content.(*message.ToolApprovalResponseContent)
 			return ok
@@ -418,7 +433,7 @@ func knownApprovalRequests(messages []*message.Message, st state) map[string]*me
 		}
 	}
 	for _, msg := range messages {
-		if msg.Role != message.RoleAssistant {
+		if msg == nil || msg.Role != message.RoleAssistant {
 			continue
 		}
 		for _, c := range msg.Contents {

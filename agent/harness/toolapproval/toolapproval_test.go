@@ -3010,3 +3010,28 @@ func TestToolApproval_DuplicateResponseHonoredOnce(t *testing.T) {
 		t.Fatalf("expected first approval response to win, got approved=%v reason=%q", responses[0].Approved, responses[0].Reason)
 	}
 }
+
+// A messages slice containing nil entries (which arise as approval responses
+// flow between middlewares, e.g. toolautocall emits slices with nil holes) must
+// not panic the approval middleware. The sibling toolautocall middleware guards
+// nil entries throughout; the approval middleware must do the same.
+func TestRun_NilMessageEntriesDoNotPanic(t *testing.T) {
+	next := func(_ context.Context, _ []*message.Message, _ ...agent.Option) iter.Seq2[*agent.ResponseUpdate, error] {
+		return func(yield func(*agent.ResponseUpdate, error) bool) {
+			yield(&agent.ResponseUpdate{
+				Role:     message.RoleAssistant,
+				Contents: message.Contents{&message.TextContent{Text: "ok"}},
+			}, nil)
+		}
+	}
+	mw := toolapproval.New(toolapproval.Config{})
+	messages := []*message.Message{
+		nil,
+		message.NewText("hello"),
+		nil,
+	}
+	updates := collectUpdates(t, mw, next, messages, agent.WithSession(&agent.Session{}))
+	if len(updates) == 0 {
+		t.Fatal("expected at least one update")
+	}
+}
