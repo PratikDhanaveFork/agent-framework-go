@@ -335,6 +335,59 @@ func TestFuncTool_NewRejectsAnyInput(t *testing.T) {
 	}
 }
 
+// Non-struct inputs are exposed to the model behind an undocumented {"Arg0": ...}
+// envelope, so models commonly send the bare value their tool description implies
+// instead. The handler must accept that bare shape in addition to the envelope.
+// Regression test for issue #1356.
+func TestFuncTool_WrappedInput_AcceptsBareValue(t *testing.T) {
+	tl := functool.MustNew(
+		functool.Config{Name: "todos_remove", Description: "remove"},
+		func(ctx context.Context, ids []int) (int, error) {
+			return len(ids), nil
+		},
+	)
+
+	// The bare array its description implies (the shape that previously failed).
+	ret, err := tl.Call(t.Context(), `[1,2]`)
+	if err != nil {
+		t.Fatalf("Call with bare array failed: %v", err)
+	}
+	if ret.(int) != 2 {
+		t.Errorf("ret = %v, want 2", ret)
+	}
+
+	// The {"Arg0": ...} envelope must keep working unchanged.
+	ret, err = tl.Call(t.Context(), `{"Arg0":[1,2,3]}`)
+	if err != nil {
+		t.Fatalf("Call with Arg0 envelope failed: %v", err)
+	}
+	if ret.(int) != 3 {
+		t.Errorf("ret = %v, want 3", ret)
+	}
+
+	// Arguments that match neither shape are still rejected.
+	if _, err := tl.Call(t.Context(), `{"unexpected":"value"}`); err == nil {
+		t.Error("expected error for arguments matching neither the bare nor wrapped shape")
+	}
+}
+
+// A bare non-struct value must also be accepted for primitive inputs, not only
+// slices. Regression test for issue #1356.
+func TestFuncTool_WrappedInput_AcceptsBarePrimitive(t *testing.T) {
+	tl := functool.MustNew(functool.Config{Name: "echo"},
+		func(ctx context.Context, s string) (string, error) {
+			return s, nil
+		})
+
+	ret, err := tl.Call(t.Context(), `"hello"`)
+	if err != nil {
+		t.Fatalf("Call with bare string failed: %v", err)
+	}
+	if ret.(string) != "hello" {
+		t.Errorf("ret = %q, want hello", ret)
+	}
+}
+
 // A *Struct input must produce the same flat schema as a Struct input and accept
 // flat arguments, not be wrapped in an inputWrapper (which would require {"Arg0":{...}}).
 func TestFuncTool_PointerStructInput_UsesFlatSchema(t *testing.T) {

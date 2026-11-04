@@ -63,7 +63,19 @@ func New[In, Out any](cfg Config, h HandlerFor[In, Out]) (tool.FuncTool, error) 
 	if err != nil {
 		return nil, fmt.Errorf("input schema: %w", err)
 	}
-	t.outputFormat, err = outputFormatFor[Out]()
+	if t.inputWrapped {
+		// The wrapped schema requires a {"Arg0": <value>} envelope whose key only
+		// exists because of the wrapper's Go field name, so it is not discoverable
+		// from the tool's name or description. Models commonly send the bare value
+		// their tool description implies instead (e.g. a bare array for `[]int`).
+		// Prepare a format that validates In directly so the handler can also accept
+		// that natural shape. See issue #1356.
+		t.bareInputFormat, err = formatForType[In]()
+		if err != nil {
+			return nil, fmt.Errorf("input schema: %w", err)
+		}
+	}
+	t.outputFormat, err = formatForType[Out]()
 	if err != nil {
 		return nil, fmt.Errorf("output schema: %w", err)
 	}
@@ -89,9 +101,15 @@ func New[In, Out any](cfg Config, h HandlerFor[In, Out]) (tool.FuncTool, error) 
 			// Extract wrapped value.
 			var decodedArgs inputWrapper[In]
 			if err := t.inputFormat.Unmarshal([]byte(args), &decodedArgs); err != nil {
-				return nil, err
+				// The model may have sent the bare value its tool description implies
+				// (e.g. [1,2]) instead of the {"Arg0": [1,2]} envelope. Fall back to
+				// decoding the arguments as the unwrapped In value (issue #1356).
+				if bareErr := t.bareInputFormat.Unmarshal([]byte(args), &in); bareErr != nil {
+					return nil, err
+				}
+			} else {
+				in = decodedArgs.Arg0
 			}
-			in = decodedArgs.Arg0
 		} else {
 			if err := t.inputFormat.Unmarshal([]byte(args), &in); err != nil {
 				return nil, err
@@ -119,7 +137,12 @@ type funcTool struct {
 
 	inputFormat  *jsonformat.Format
 	inputWrapped bool
-	outputFormat *jsonformat.Format
+	// bareInputFormat validates the unwrapped In value directly. It is only set
+	// when inputWrapped is true, and lets the handler accept arguments sent in the
+	// bare shape the tool description implies in addition to the {"Arg0": ...}
+	// envelope. See issue #1356.
+	bareInputFormat *jsonformat.Format
+	outputFormat    *jsonformat.Format
 }
 
 func (t *funcTool) Name() string {
@@ -176,7 +199,7 @@ func inputFormatFor[T any]() (format *jsonformat.Format, wrapped bool, err error
 	return format, wrapped, err
 }
 
-func outputFormatFor[T any]() (*jsonformat.Format, error) {
+func formatForType[T any]() (*jsonformat.Format, error) {
 	typ := reflect.TypeFor[T]()
 	responseFormat, err := jsonformat.ForType(typ)
 	if err != nil {
