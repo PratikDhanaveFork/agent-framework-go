@@ -668,6 +668,32 @@ func (p *provider) assistantMessageDeltaUpdate(event copilot.SessionEvent, data 
 	}
 }
 
+// copilotCitationAnnotations converts a Copilot message's native citations into
+// framework CitationAnnotations, skipping sources with no usable fields. It
+// returns nil when there are no citations, so both the streaming and
+// non-streaming paths can surface identical citation metadata.
+func copilotCitationAnnotations(data *copilot.AssistantMessageData) message.Annotations {
+	if data.Citations == nil {
+		return nil
+	}
+	var annotations message.Annotations
+	for _, source := range data.Citations.Sources {
+		fileID := firstNonNilString(source.Path)
+		title := firstNonNilString(source.Title)
+		url := firstNonNilString(source.URL)
+		if fileID == "" && title == "" && url == "" {
+			continue
+		}
+		annotations = append(annotations, &message.CitationAnnotation{
+			FileID:            fileID,
+			Title:             title,
+			URL:               url,
+			RawRepresentation: source,
+		})
+	}
+	return annotations
+}
+
 func (p *provider) assistantMessageUpdate(event copilot.SessionEvent, data *copilot.AssistantMessageData, streaming bool) *agent.ResponseUpdate {
 	update := &agent.ResponseUpdate{
 		RawRepresentation: event,
@@ -680,6 +706,20 @@ func (p *provider) assistantMessageUpdate(event copilot.SessionEvent, data *copi
 		update.Contents = []message.Content{&message.RawContent{
 			ContentHeader: message.ContentHeader{RawRepresentation: event},
 		}}
+		// The streamed text arrives via assistant.message_delta events, but
+		// citations have no separate stream event and are only present on this
+		// final accumulated message. Emit them as an annotations-only
+		// TextContent (empty Text avoids duplicating the streamed text) so
+		// streamed responses carry the same citations as the non-streaming path,
+		// mirroring the anthropic provider.
+		if annotations := copilotCitationAnnotations(data); len(annotations) > 0 {
+			update.Contents = append(update.Contents, &message.TextContent{
+				ContentHeader: message.ContentHeader{
+					Annotations:       annotations,
+					RawRepresentation: event,
+				},
+			})
+		}
 	} else {
 		textContent := &message.TextContent{
 			ContentHeader: message.ContentHeader{RawRepresentation: event},
@@ -688,24 +728,7 @@ func (p *provider) assistantMessageUpdate(event copilot.SessionEvent, data *copi
 		// Surface native model citations (enabled via
 		// AgentConfig.SessionConfig.EnableCitations) as CitationAnnotations,
 		// mirroring the OpenAI chat/Responses providers.
-		if data.Citations != nil {
-			for _, source := range data.Citations.Sources {
-				fileID := firstNonNilString(source.Path)
-				title := firstNonNilString(source.Title)
-				url := firstNonNilString(source.URL)
-				// Skip sources with no usable fields so we do not emit an empty
-				// annotation, matching the filtering other providers apply.
-				if fileID == "" && title == "" && url == "" {
-					continue
-				}
-				textContent.Annotations = append(textContent.Annotations, &message.CitationAnnotation{
-					FileID:            fileID,
-					Title:             title,
-					URL:               url,
-					RawRepresentation: source,
-				})
-			}
-		}
+		textContent.Annotations = copilotCitationAnnotations(data)
 		update.Contents = []message.Content{textContent}
 		if data.ReasoningText != nil {
 			update.Contents = append(update.Contents, &message.TextReasoningContent{

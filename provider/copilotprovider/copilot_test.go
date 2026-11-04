@@ -1427,6 +1427,56 @@ func TestConvertToAgentResponseUpdate_AssistantMessageSurfacesCitations(t *testi
 	}
 }
 
+// Citations have no separate streaming event, so a streamed run must still
+// surface them from the final accumulated assistant.message (previously the
+// streaming path emitted only RawContent and dropped them).
+func TestConvertToAgentResponseUpdate_AssistantMessageSurfacesCitations_Streaming(t *testing.T) {
+	runtime := newFakeRuntime(t,
+		sessionEvent("assistant.message", map[string]any{
+			"messageId": "msg-cite",
+			"content":   "The sky is blue.",
+			"citations": map[string]any{
+				"sources": []any{
+					map[string]any{
+						"id":       "s1",
+						"provider": "openai",
+						"title":    "Sky facts",
+						"url":      "https://example.com/sky",
+					},
+				},
+				"spans": []any{},
+			},
+		}),
+		idleEvent(),
+	)
+	agent := copilotprovider.NewAgent(runtime.client(), copilotprovider.AgentConfig{})
+
+	response, err := runText(t, agent, "why is the sky blue?", agentpkg.Stream(true))
+	if err != nil {
+		t.Fatalf("RunText: %v", err)
+	}
+	var citation *message.CitationAnnotation
+	for _, msg := range response.Messages {
+		for _, c := range msg.Contents {
+			tc, ok := c.(*message.TextContent)
+			if !ok {
+				continue
+			}
+			for _, ann := range tc.Annotations {
+				if ca, ok := ann.(*message.CitationAnnotation); ok {
+					citation = ca
+				}
+			}
+		}
+	}
+	if citation == nil {
+		t.Fatal("expected a CitationAnnotation on the streamed response")
+	}
+	if citation.Title != "Sky facts" || citation.URL != "https://example.com/sky" {
+		t.Errorf("citation = %#v, want Title=%q URL=%q", citation, "Sky facts", "https://example.com/sky")
+	}
+}
+
 func TestConvertToAgentResponseUpdate_AssistantMessageSkipsEmptyCitationSources(t *testing.T) {
 	runtime := newFakeRuntime(t,
 		sessionEvent("assistant.message", map[string]any{
