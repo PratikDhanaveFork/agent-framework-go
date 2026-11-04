@@ -1527,6 +1527,36 @@ func TestContentsCoalesce(t *testing.T) {
 	}
 }
 
+// Coalescing adjacent DataContent chunks must carry the first chunk's
+// AdditionalProperties forward, matching the text/reasoning/code-interpreter
+// mergers; previously the DataContent merger dropped the header.
+func TestContentsCoalesce_DataContentPreservesAdditionalProperties(t *testing.T) {
+	first := &message.DataContent{
+		ContentHeader: message.ContentHeader{AdditionalProperties: map[string]any{"provider": "openai"}},
+		Data:          base64.StdEncoding.EncodeToString([]byte("hello")),
+		MediaType:     "text/plain",
+	}
+	second := &message.DataContent{
+		Data:      base64.StdEncoding.EncodeToString([]byte(" world")),
+		MediaType: "text/plain",
+	}
+
+	got := (message.Contents{first, second}).Coalesce()
+	if len(got) != 1 {
+		t.Fatalf("Coalesce() produced %d contents, want 1", len(got))
+	}
+	merged, ok := got[0].(*message.DataContent)
+	if !ok {
+		t.Fatalf("merged content type = %T, want *message.DataContent", got[0])
+	}
+	if merged.AdditionalProperties["provider"] != "openai" {
+		t.Errorf("merged AdditionalProperties = %#v, want provider=openai preserved", merged.AdditionalProperties)
+	}
+	if decoded, _ := merged.Bytes(); string(decoded) != "hello world" {
+		t.Errorf("merged data = %q, want %q", decoded, "hello world")
+	}
+}
+
 func TestContentsCoalesce_PreservesInvalidDataContent(t *testing.T) {
 	invalid := &message.DataContent{Data: "%%%", MediaType: "text/plain"}
 	valid := &message.DataContent{Data: base64.StdEncoding.EncodeToString([]byte("valid")), MediaType: "text/plain"}
