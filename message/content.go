@@ -1218,44 +1218,76 @@ func (contents Contents) Coalesce() Contents {
 			}
 		})
 
-	contents = coalesce(contents, true,
-		func(a, b *CodeInterpreterToolCallContent) bool { return a.CallID == b.CallID },
-		func(contents []Content, start, end int) *CodeInterpreterToolCallContent {
-			first := contents[start].(*CodeInterpreterToolCallContent)
-			if end-start == 1 {
-				first.Inputs = first.Inputs.Coalesce()
-				return first
-			}
-			var inputs Contents
-			for _, c := range contents[start:end] {
-				inputs = append(inputs, c.(*CodeInterpreterToolCallContent).Inputs...)
-			}
-			return &CodeInterpreterToolCallContent{
-				ContentHeader: ContentHeader{AdditionalProperties: maps.Clone(first.AdditionalProperties)},
-				CallID:        first.CallID,
-				Inputs:        inputs.Coalesce(),
-			}
-		})
+	contents = coalesceCodeInterpreterToolCalls(contents)
+	contents = coalesceCodeInterpreterToolResults(contents)
 
-	contents = coalesce(contents, true,
-		func(a, b *CodeInterpreterToolResultContent) bool { return a.CallID == b.CallID },
-		func(contents []Content, start, end int) *CodeInterpreterToolResultContent {
-			first := contents[start].(*CodeInterpreterToolResultContent)
-			if end-start == 1 {
-				first.Outputs = first.Outputs.Coalesce()
-				return first
-			}
-			var outputs Contents
-			for _, c := range contents[start:end] {
-				outputs = append(outputs, c.(*CodeInterpreterToolResultContent).Outputs...)
-			}
-			return &CodeInterpreterToolResultContent{
-				ContentHeader: ContentHeader{AdditionalProperties: maps.Clone(first.AdditionalProperties)},
-				CallID:        first.CallID,
-				Outputs:       outputs.Coalesce(),
-			}
-		})
+	return contents
+}
 
+// coalesceCodeInterpreterToolCalls merges code-interpreter tool-call content
+// that shares a call ID regardless of position, mirroring the image-generation
+// and web-search passes (and matching the [Contents.Coalesce] contract). A
+// single occurrence keeps its identity, including its raw representation, and
+// only has its nested inputs coalesced; merged occurrences concatenate inputs
+// onto the first occurrence and drop the now-stale raw representation.
+func coalesceCodeInterpreterToolCalls(contents Contents) Contents {
+	indexByCallID := make(map[string]int)
+	for i, content := range contents {
+		call, ok := content.(*CodeInterpreterToolCallContent)
+		if !ok || call == nil {
+			continue
+		}
+		existingIndex, ok := indexByCallID[call.CallID]
+		if !ok {
+			indexByCallID[call.CallID] = i
+			continue
+		}
+		existing := contents[existingIndex].(*CodeInterpreterToolCallContent)
+		contents[existingIndex] = &CodeInterpreterToolCallContent{
+			ContentHeader: ContentHeader{AdditionalProperties: maps.Clone(existing.AdditionalProperties)},
+			CallID:        existing.CallID,
+			Inputs:        slices.Concat(existing.Inputs, call.Inputs),
+		}
+		contents[i] = nil
+	}
+	contents = slices.DeleteFunc(contents, func(c Content) bool { return c == nil })
+	for _, content := range contents {
+		if call, ok := content.(*CodeInterpreterToolCallContent); ok {
+			call.Inputs = call.Inputs.Coalesce()
+		}
+	}
+	return contents
+}
+
+// coalesceCodeInterpreterToolResults merges code-interpreter tool-result content
+// that shares a call ID regardless of position, mirroring
+// [coalesceCodeInterpreterToolCalls] for outputs.
+func coalesceCodeInterpreterToolResults(contents Contents) Contents {
+	indexByCallID := make(map[string]int)
+	for i, content := range contents {
+		result, ok := content.(*CodeInterpreterToolResultContent)
+		if !ok || result == nil {
+			continue
+		}
+		existingIndex, ok := indexByCallID[result.CallID]
+		if !ok {
+			indexByCallID[result.CallID] = i
+			continue
+		}
+		existing := contents[existingIndex].(*CodeInterpreterToolResultContent)
+		contents[existingIndex] = &CodeInterpreterToolResultContent{
+			ContentHeader: ContentHeader{AdditionalProperties: maps.Clone(existing.AdditionalProperties)},
+			CallID:        existing.CallID,
+			Outputs:       slices.Concat(existing.Outputs, result.Outputs),
+		}
+		contents[i] = nil
+	}
+	contents = slices.DeleteFunc(contents, func(c Content) bool { return c == nil })
+	for _, content := range contents {
+		if result, ok := content.(*CodeInterpreterToolResultContent); ok {
+			result.Outputs = result.Outputs.Coalesce()
+		}
+	}
 	return contents
 }
 

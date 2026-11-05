@@ -1452,6 +1452,48 @@ func TestContentsCoalesce(t *testing.T) {
 			},
 		},
 		{
+			name: "code interpreter tool calls with the same call id coalesce regardless of position",
+			input: []message.Content{
+				&message.CodeInterpreterToolCallContent{
+					CallID: "call-1",
+					Inputs: message.Contents{&message.TextContent{Text: "a"}},
+				},
+				&message.TextContent{Text: "between"},
+				&message.CodeInterpreterToolCallContent{
+					CallID: "call-1",
+					Inputs: message.Contents{&message.TextContent{Text: "b"}},
+				},
+			},
+			expected: []message.Content{
+				&message.CodeInterpreterToolCallContent{
+					CallID: "call-1",
+					Inputs: message.Contents{&message.TextContent{Text: "ab"}},
+				},
+				&message.TextContent{Text: "between"},
+			},
+		},
+		{
+			name: "code interpreter tool results with the same call id coalesce regardless of position",
+			input: []message.Content{
+				&message.CodeInterpreterToolResultContent{
+					CallID:  "call-1",
+					Outputs: message.Contents{&message.TextContent{Text: "re"}},
+				},
+				&message.TextContent{Text: "between"},
+				&message.CodeInterpreterToolResultContent{
+					CallID:  "call-1",
+					Outputs: message.Contents{&message.TextContent{Text: "sult"}},
+				},
+			},
+			expected: []message.Content{
+				&message.CodeInterpreterToolResultContent{
+					CallID:  "call-1",
+					Outputs: message.Contents{&message.TextContent{Text: "result"}},
+				},
+				&message.TextContent{Text: "between"},
+			},
+		},
+		{
 			name: "image generation results with the same call id keep the latest result",
 			input: []message.Content{
 				&message.ImageGenerationToolResultContent{
